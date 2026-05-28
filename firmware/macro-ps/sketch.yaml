@@ -1,0 +1,18 @@
+# Build spec for this firmware. install.sh parses this file directly and
+# installs the platform + libraries to the user library scope before
+# compiling. We deliberately do not set `default_profile` — that would
+# activate arduino-cli's sketch-profile mode, which silently ignores the
+# `--libraries` flag we use to surface the git-cloned micro_ros_arduino.
+
+profiles:
+  feather:
+    fqbn: rp2040:rp2040:adafruit_feather
+    platforms:
+      - platform: rp2040:rp2040 (4.4.4)
+        platform_index_url: https://github.com/earlephilhower/arduino-pico/releases/download/global/package_rp2040_index.json
+    libraries:
+      - TMCStepper (0.7.3)
+      - Adafruit NeoPixel (1.12.3)
+      - Adafruit LSM6DS (4.7.4)
+      - Adafruit BusIO (1.16.3)
+      - Adafruit Unified Sensor (1.1.14)

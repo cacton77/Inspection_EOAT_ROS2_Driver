@@ -1,0 +1,6 @@
+flash_method: uf2
+bootloader_label: RPI-RP2
+serial_glob: /dev/ttyACM*
+extra_libraries:
+  - git_url: https://github.com/micro-ROS/micro_ros_arduino.git
+
