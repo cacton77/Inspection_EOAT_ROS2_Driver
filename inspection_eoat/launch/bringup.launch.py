@@ -31,6 +31,19 @@ def generate_launch_description():
         }],
     )
 
+    pi_camera_node = Node(
+        package="camera_ros",
+        executable="camera_node",
+        name="pi_camera",
+        output="screen",
+        parameters=[{
+            'camera': 0,
+            'width': 1280,
+            'height': 720,
+            'format': 'RGB888',
+        }],
+    )
+
     joy_node = Node(
         package='joy',
         executable="joy_node",
@@ -63,6 +76,7 @@ def generate_launch_description():
     return LaunchDescription(declared_arguments + [
         joy_node,
         d405_camera_node,
+        pi_camera_node,
         # micro_ros_agent_node,
         # macro_ps_agent_node,
         # imu_processor_node,
