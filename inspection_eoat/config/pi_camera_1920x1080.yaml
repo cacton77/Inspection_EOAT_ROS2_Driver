@@ -1,0 +1,55 @@
+# camera_ros (pi_camera) parameters — 1920x1080 sensor mode.
+#
+# One file per sensor mode: width/height are paired here with the
+# camera_info_url of the calibration derived for that exact resolution.
+# Intrinsics do NOT survive a resolution change, so never edit width/height
+# without pointing camera_info_url at a matching calibration file.
+#
+# libcamera serves 1920x1080 from the IMX477 2028x1080 mode (2x2-binned
+# readout, full horizontal FoV, symmetric vertical crop, ISP 2028 -> 1920).
+#
+# Select at launch with:
+#   ros2 launch inspection_eoat bringup.launch.py \
+#       pi_camera_config:=<path to another mode's yaml>
+#
+pi_camera:
+  ros__parameters:
+    camera: 0
+    width: 1920
+    height: 1080
+    format: RGB888
+    frame_id: eoat_camera_link
+
+    # Pin the RAW readout mode rather than letting libcamera choose. The
+    # requested output size alone does NOT determine the sensor mode — the same
+    # 1920x1080 output could be served from the full 4056x3040 readout (scaled)
+    # instead of the 2028x1080 binned mode, with a different FoV and therefore
+    # different intrinsics. Pinning it is what makes the paired calibration
+    # below reproducible.
+    # Confirmed by libcamera: "Selected sensor format: 2028x1080-SBGGR12_1X12".
+    sensor_mode: "2028:1080"
+
+    # Theoretical (uncalibrated) intrinsics for the macro-PS rig at minimum
+    # magnification (0.12x). camera_info_manager resolves the package:// URL
+    # at runtime. Replace with measured intrinsics once ChArUco calibration
+    # is run for this mode.
+    camera_info_url: package://inspection_eoat/config/macro_ps_imx477_min_mag_1920x1080.yaml
+
+    # BEST_EFFORT + VOLATILE for image streams, same rationale as the D405 in
+    # bringup.launch.py: default RELIABLE stalls the writer on cross-host UDP
+    # fragment loss. camera_ros gained per-topic qos_overrides in PR #155
+    # (June 2026). Keys are node-name scoped, so they track the `pi_camera`
+    # node name set in the launch file.
+    qos_overrides:
+      /pi_camera/image_raw:
+        publisher:
+          reliability: best_effort
+          durability: volatile
+          history: keep_last
+          depth: 5
+      /pi_camera/camera_info:
+        publisher:
+          reliability: best_effort
+          durability: volatile
+          history: keep_last
+          depth: 5

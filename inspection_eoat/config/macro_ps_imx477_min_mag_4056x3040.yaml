@@ -5,32 +5,27 @@
 # solver seed. Replace with measured intrinsics once the calibration in
 # "Spatial Resolution.md" (Camera Calibration Plan) has been run.
 #
-# Scaled to the 1920x1080 stream configured for the pi_camera node in
-# bringup.launch.py (was originally derived for the full 4056x3040 sensor).
+# Full sensor-native 4056x3040 stream configured by config/pi_camera_4056x3040.yaml
+# (full-resolution readout, no binning, no crop). This file is only valid for that
+# resolution — each sensor mode needs its own calibration, paired with the mode's
+# width/height in the matching pi_camera_*.yaml.
 #
-# Full-sensor derivation:
+# Derivation:
 #   Sensor : Sony IMX477R, 4056 x 3040 px, pixel pitch p = 1.55 um
 #   Lens   : Pimoroni CAM011, focal length f = 55 mm, magnification M = 0.12x
-#   fx = fy = f*(1 + M)/p = 55 mm * 1.12 / 1.55 um = 39741.94 px (@ 4056x3040)
-#   cx, cy = (2028.0, 1520.0) px
-#
-# Scaling to 1920x1080:
-#   libcamera serves 1920x1080 from the IMX477 2028x1080 mode: a 2x2-binned
-#   readout that preserves the FULL horizontal FoV and crops symmetrically in
-#   the vertical, then the ISP scales 2028 -> 1920. Pixels stay square, so:
-#     fx = fy = 39741.94 * (1920 / 4056) = 18812.75 px
-#     cx, cy = image center = (960.0, 540.0) px
+#   fx = fy = f*(1 + M)/p = 55 mm * 1.12 / 1.55 um = 39741.94 px
+#   cx, cy = image center = (2028.0, 1520.0) px
 #   distortion : lens spec < -0.1% -> assumed zero (plumb_bob, all coeffs 0)
 #
-image_width: 1920
-image_height: 1080
+image_width: 4056
+image_height: 3040
 camera_name: macro_ps_imx477_min_mag
 
 camera_matrix:
   rows: 3
   cols: 3
-  data: [18812.75,      0.0,  960.0,
-              0.0, 18812.75,  540.0,
+  data: [39741.94,      0.0, 2028.0,
+              0.0, 39741.94, 1520.0,
               0.0,      0.0,    1.0]
 
 distortion_model: plumb_bob
@@ -49,6 +44,6 @@ rectification_matrix:
 projection_matrix:
   rows: 3
   cols: 4
-  data: [18812.75,      0.0,  960.0, 0.0,
-              0.0, 18812.75,  540.0, 0.0,
+  data: [39741.94,      0.0, 2028.0, 0.0,
+              0.0, 39741.94, 1520.0, 0.0,
               0.0,      0.0,    1.0, 0.0]

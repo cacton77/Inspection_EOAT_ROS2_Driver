@@ -1,5 +1,7 @@
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, RegisterEventHandler
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
+from launch_ros.substitutions import FindPackageShare
 from launch import LaunchDescription
 
 
@@ -7,6 +9,19 @@ def generate_launch_description():
     declared_arguments = [
         # Add any declared arguments here if needed in the future
         # DeclareLaunchArgument("cell", default_value="alpha"),
+        DeclareLaunchArgument(
+            "pi_camera_config",
+            default_value=PathJoinSubstitution([
+                FindPackageShare("inspection_eoat"),
+                "config",
+                "pi_camera_4056x3040.yaml",
+            ]),
+            description=(
+                "Parameter file for the pi_camera node. One file per sensor "
+                "mode: it pairs width/height with the camera_info_url of the "
+                "calibration derived for that resolution."
+            ),
+        ),
     ]
 
     d405_camera_node = Node(
@@ -34,31 +49,11 @@ def generate_launch_description():
     pi_camera_node = Node(
         package="camera_ros",
         executable="camera_node",
+        # The parameter file is keyed on this node name, and so are its
+        # qos_overrides entries — keep them in sync if this is renamed.
         name="pi_camera",
         output="screen",
-        parameters=[{
-            'camera': 0,
-            'width': 1920,
-            'height': 1080,
-            'format': 'RGB888',
-            'frame_id': 'eoat_camera_link',
-            # Theoretical (uncalibrated) intrinsics for the macro-PS rig at
-            # minimum magnification (0.12x). camera_info_manager resolves the
-            # package:// URL to config/macro_ps_imx477_min_mag.yaml at runtime.
-            # Replace with measured intrinsics once ChArUco calibration is run.
-            'camera_info_url': 'package://inspection_eoat/config/macro_ps_imx477_min_mag.yaml',
-            # BEST_EFFORT + VOLATILE for image streams, same rationale as the
-            # D405 above: default RELIABLE stalls over cross-host UDP loss.
-            # camera_ros gained per-topic qos_overrides in PR #155 (June 2026).
-            'qos_overrides./pi_camera/image_raw.publisher.reliability': 'best_effort',
-            'qos_overrides./pi_camera/image_raw.publisher.durability': 'volatile',
-            'qos_overrides./pi_camera/image_raw.publisher.history': 'keep_last',
-            'qos_overrides./pi_camera/image_raw.publisher.depth': 5,
-            'qos_overrides./pi_camera/camera_info.publisher.reliability': 'best_effort',
-            'qos_overrides./pi_camera/camera_info.publisher.durability': 'volatile',
-            'qos_overrides./pi_camera/camera_info.publisher.history': 'keep_last',
-            'qos_overrides./pi_camera/camera_info.publisher.depth': 5,
-        }],
+        parameters=[LaunchConfiguration("pi_camera_config")],
     )
 
     joy_node = Node(
