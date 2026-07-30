@@ -1,39 +1,39 @@
-# camera_ros (pi_camera) parameters — 1920x1080 sensor mode.
+# camera_ros (pi_camera) parameters — 2028x1520 sensor mode (2x2-binned, full FoV).
 #
 # One file per sensor mode: width/height are paired here with the
 # camera_info_url of the calibration derived for that exact resolution.
 # Intrinsics do NOT survive a resolution change, so never edit width/height
 # without pointing camera_info_url at a matching calibration file.
 #
-# libcamera serves 1920x1080 from the IMX477 2028x1080 mode (2x2-binned
-# readout, full horizontal FoV, symmetric vertical crop, ISP 2028 -> 1920).
+# libcamera serves 2028x1520 from the IMX477 2x2-binned full-resolution readout:
+# the COMPLETE sensor array binned 2x2, no crop, so it keeps the full 4:3 field of
+# view and is exactly half of 4056x3040 in each axis. Binning improves SNR and
+# quarters the data vs full res, so this is the high-fps / autofocus mode
+# (~54 fps at 10-bit, ~45 fps at 12-bit) while still covering the whole FoV. Use
+# pi_camera_4056x3040.yaml when maximum detail is needed instead of frame rate.
+#
+# This supersedes pi_camera_1920x1080.yaml as the fast full-FoV mode: 1920x1080 is
+# ISP-rescaled from the 2028x1080 mode (cropped vertical FoV, non-integer scale),
+# whereas 2028x1520 is a native, uncropped, exact-1/2 mode whose intrinsics are
+# just the full-res intrinsics halved.
 #
 # Select at launch with:
 #   ros2 launch inspection_eoat bringup.launch.py \
-#       pi_camera_config:=<path to another mode's yaml>
+#       pi_camera_config:=<path to this yaml>
 #
 pi_camera:
   ros__parameters:
     camera: 0
-    width: 1920
-    height: 1080
+    width: 2028
+    height: 1520
     format: RGB888
     frame_id: eoat_camera_link
-
-    # Pin the RAW readout mode rather than letting libcamera choose. The
-    # requested output size alone does NOT determine the sensor mode — the same
-    # 1920x1080 output could be served from the full 4056x3040 readout (scaled)
-    # instead of the 2028x1080 binned mode, with a different FoV and therefore
-    # different intrinsics. Pinning it is what makes the paired calibration
-    # below reproducible.
-    # Confirmed by libcamera: "Selected sensor format: 2028x1080-SBGGR12_1X12".
-    sensor_mode: "2028:1080"
 
     # Theoretical (uncalibrated) intrinsics for the macro-PS rig at minimum
     # magnification (0.12x). camera_info_manager resolves the package:// URL
     # at runtime. Replace with measured intrinsics once ChArUco calibration
     # is run for this mode.
-    camera_info_url: package://inspection_eoat/config/macro_ps_imx477_min_mag_1920x1080.yaml
+    camera_info_url: package://inspection_eoat/config/macro_ps_imx477_min_mag_2028x1520.yaml
 
     # BEST_EFFORT + VOLATILE for image streams, same rationale as the D405 in
     # bringup.launch.py: default RELIABLE stalls the writer on cross-host UDP

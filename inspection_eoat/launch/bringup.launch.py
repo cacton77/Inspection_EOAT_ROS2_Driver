@@ -14,7 +14,7 @@ def generate_launch_description():
             default_value=PathJoinSubstitution([
                 FindPackageShare("inspection_eoat"),
                 "config",
-                "pi_camera_4056x3040.yaml",
+                "pi_camera_2028x1520.yaml",
             ]),
             description=(
                 "Parameter file for the pi_camera node. One file per sensor "
