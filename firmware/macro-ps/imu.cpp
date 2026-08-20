@@ -33,13 +33,13 @@ static inline void cross3(const float a[3], const float b[3], float out[3]) {
 }
 
 bool imu_init() {
-  // Feather RP2040 routes the STEMMA QT connector to the default Wire
-  // (GP2/GP3). Pin Wire to those GPIOs explicitly so this doesn't silently
+  // QT Py RP2040 routes the STEMMA QT connector to Wire1 (GP22/GP23), not the
+  // default Wire. Pin Wire1 to those GPIOs explicitly so this doesn't silently
   // come up on the wrong pads if the build target is ever wrong.
-  Wire.setSDA(I2C_SDA_PIN);
-  Wire.setSCL(I2C_SCL_PIN);
-  Wire.begin();
-  if (!imu.begin_I2C(LSM6DS_I2CADDR_DEFAULT, &Wire)) {
+  Wire1.setSDA(I2C_SDA_PIN);
+  Wire1.setSCL(I2C_SCL_PIN);
+  Wire1.begin();
+  if (!imu.begin_I2C(LSM6DS_I2CADDR_DEFAULT, &Wire1)) {
     return false;
   }
   imu.setAccelRange(LSM6DS_ACCEL_RANGE_4_G);

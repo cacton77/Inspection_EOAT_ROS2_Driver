@@ -5,8 +5,8 @@
 # `--libraries` flag we use to surface the git-cloned micro_ros_arduino.
 
 profiles:
-  feather:
-    fqbn: rp2040:rp2040:adafruit_feather
+  qtpy:
+    fqbn: rp2040:rp2040:adafruit_qtpy
     platforms:
       - platform: rp2040:rp2040 (4.4.4)
         platform_index_url: https://github.com/earlephilhower/arduino-pico/releases/download/global/package_rp2040_index.json

@@ -1,7 +1,7 @@
-// Camera Head Controller — macro-PS firmware.
-// Current iteration: LSM6DSOX → /camera_head/imu over USB-CDC micro-ROS.
-// Other subsystems (LED, stepper, joystick, buttons, XVS) are scaffolded
-// as no-op stubs and will be filled in subsequent iterations.
+// Camera Head Controller — macro-PS firmware. Target: Adafruit QT Py RP2040.
+// Current iteration: LSM6DSOX → /camera_head/imu over USB-CDC micro-ROS,
+// plus the NeoPixel ring/NeoKey renderer and the TMC2209 lens stepper.
+// Joystick, buttons and XVS remain no-op stubs.
 
 #include <Arduino.h>
 
@@ -11,8 +11,8 @@
 #include "microros.h"
 #include "status_led.h"
 
-#include "led_stub.h"
-#include "stepper_stub.h"
+#include "led.h"
+#include "stepper.h"
 #include "joystick_stub.h"
 #include "buttons_stub.h"
 #include "xvs_stub.h"
@@ -75,7 +75,7 @@ void loop() {
 }
 
 // -----------------------------------------------------------------------------
-// Core 1 — peripherals (IMU now; LED/stepper/joystick/buttons later)
+// Core 1 — peripherals (IMU, LEDs, stepper now; joystick/buttons later)
 // -----------------------------------------------------------------------------
 void setup1() {
   // Wait for core 0's state_init() to finish before touching shared state.
@@ -95,8 +95,16 @@ void setup1() {
       delay(50);
     }
   }
-  led_init();
-  stepper_init();
+  // LED failure is cosmetic and stepper failure only costs us homing, so
+  // neither is worth trapping core 1 the way a dead IMU is.
+  if (!led_init()) {
+    // No pixel buffer — carry on dark.
+  }
+  if (!stepper_init()) {
+    // Driver didn't answer over UART. Stepping still works open-loop;
+    // homing will abort to SYS_UNCALIBRATED rather than seek blind.
+  }
+
   joystick_init();
   buttons_init();
 }
