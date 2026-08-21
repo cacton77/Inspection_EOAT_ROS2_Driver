@@ -74,6 +74,46 @@ Turning it off is the correct fix rather than a workaround: pico-sdk's
 implementations are the dual-core-safe ones for this chip, which rcutils'
 generic emulation is not.
 
+## Only an x86_64 host can build this
+
+The builder image is published for arm64, but the ARM cross toolchains bundled
+inside it are **x86_64 ELF binaries** — ARM never shipped AArch64-host builds of
+`gcc-arm-none-eabi-7-2017-q4-major`, which is what `library_generation.sh` uses
+for `cortex_m0`. On the Pi the build dies almost immediately with the shell
+trying to interpret an ELF as a script:
+
+```
+/uros_ws/gcc-arm-none-eabi-7-2017-q4-major/bin/arm-none-eabi-gcc: 1: ELF: not found
+/uros_ws/gcc-arm-none-eabi-7-2017-q4-major/bin/arm-none-eabi-gcc: 1: Syntax error: Unterminated quoted string
+```
+
+```bash
+$ docker run --rm --entrypoint readelf microros/micro_ros_static_library_builder:jazzy \
+      -h /uros_ws/gcc-arm-none-eabi-7-2017-q4-major/bin/arm-none-eabi-gcc | grep Machine
+  Machine:  Advanced Micro Devices X86-64     # ...on an arm64 host
+```
+
+That is fine, because **`libmicroros.a` is a Cortex-M0+ cross-compiled artifact
+and does not care which machine produced it** — exactly why upstream ships one
+precompiled in the first place. So the workflow is: build on x86_64, commit the
+result, and every host installs it.
+
+`prebuilt/libmicroros-<distro>-<target>.tar.gz` (about 3 MB) holds the built
+`src/` tree plus `available_ros2_types` and `built_packages`, and
+`prebuilt/*.stamp` records the digest it was built from. `install.sh` prefers a
+matching bundle over rebuilding even on x86_64 — it takes seconds instead of 20
+minutes — and re-exports it automatically whenever it does build, so the
+committed copy stays in step.
+
+**After changing anything in `ps_interfaces` or `colcon_rp2040.meta`, run
+`install.sh` on an x86_64 machine and commit the regenerated bundle**, or the Pi
+will refuse to install with a stamp mismatch. The tarball is written with
+normalised metadata and `gzip -n`, so identical inputs produce an identical file
+and the git history does not churn.
+
+Emulating amd64 on the Pi (`--platform linux/amd64` with qemu binfmt) would work
+in principle but takes hours; it is not worth it against a 3 MB file.
+
 ## How it gets used
 
 `install.sh` drives this; there is nothing to run by hand. For each sketch
@@ -89,11 +129,15 @@ compiling:
    only, which regenerates `src/` and `src/cortex-m0plus/libmicroros.a` in
    place.
 
+...unless a committed `prebuilt/` bundle already matches, in which case it just
+unpacks that and skips all of the above.
+
 The rebuild takes 10-20 minutes and needs Docker, so it is **stamped**: a
 digest of the interface definitions, the `.meta`, `$ROS_DISTRO`, the target and
 the upstream commit is written to `.microros_build_stamp` in the clone, and the
 rebuild is skipped when nothing has changed. `arduino/extra-libraries/` is
-gitignored, so the first `install.sh` on a fresh machine always pays it once.
+gitignored, so without the bundle every fresh machine would pay the build once —
+and an arm64 machine could not pay it at all.
 
 If the builder container cannot reach the network, `MICROROS_DOCKER_ARGS` is
 passed through to `docker run` — useful for a proxy, or for `--network host`

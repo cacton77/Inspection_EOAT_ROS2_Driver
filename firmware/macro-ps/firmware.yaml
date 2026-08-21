@@ -16,6 +16,11 @@ micro_ros_library:
   # Archive the target produces, relative to the micro_ros_arduino root.
   # install.sh checks for it to confirm the build actually landed.
   archive: src/cortex-m0plus/libmicroros.a
+  # Committed prebuilt bundle of the built library, relative to this file.
+  # libmicroros.a is a Cortex-M cross-compiled artifact, so whichever host
+  # produced it, every host can use it. arm64 hosts (the Pi) *must*: the
+  # cross toolchains inside the builder image are x86_64-only.
+  prebuilt: micro_ros/prebuilt
   # colcon .meta overriding the RMW entity limits. Path is relative to this file.
   meta: micro_ros/colcon_rp2040.meta
   # Interface packages cross-compiled into the archive. Paths are relative to
