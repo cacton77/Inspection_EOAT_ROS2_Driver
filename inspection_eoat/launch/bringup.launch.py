@@ -86,9 +86,9 @@ def generate_launch_description():
     )
 
     return LaunchDescription(declared_arguments + [
-        joy_node,
-        d405_camera_node,
-        pi_camera_node,
+        # joy_node,
+        # d405_camera_node,
+        # pi_camera_node,
         # turntable_agent_node,
         macro_ps_agent_node,
         # imu_processor_node,
