@@ -4,3 +4,21 @@ serial_glob: /dev/ttyACM*
 extra_libraries:
   - git_url: https://github.com/micro-ROS/micro_ros_arduino.git
 
+# Rebuild micro_ros_arduino's precompiled libmicroros.a before compiling this
+# sketch. Needed both for the custom types in ps_interfaces and for the entity
+# budget an action server requires -- upstream's cortex_m0 archive is built
+# with RMW_UXRCE_MAX_SERVICES=0. See micro_ros/README.md.
+micro_ros_library:
+  # Library target from micro_ros_arduino's library_generation.sh.
+  # cortex_m0 -> src/cortex-m0plus/libmicroros.a, which is what the
+  # rp2040:rp2040:adafruit_qtpy FQBN links against.
+  target: cortex_m0
+  # Archive the target produces, relative to the micro_ros_arduino root.
+  # install.sh checks for it to confirm the build actually landed.
+  archive: src/cortex-m0plus/libmicroros.a
+  # colcon .meta overriding the RMW entity limits. Path is relative to this file.
+  meta: micro_ros/colcon_rp2040.meta
+  # Interface packages cross-compiled into the archive. Paths are relative to
+  # this file. Each one added costs a full library rebuild.
+  extra_packages:
+    - ../../ps_interfaces

@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>ps_interfaces</name>
+  <version>0.1.0</version>
+  <description>
+    Messages and actions for the macro-ps photometric-stereo inspection camera
+    head: focus-lens control, lens homing, and LED ring illumination.
+
+    This package is built twice from the same definitions: by colcon inside the
+    container for the host-side nodes, and cross-compiled into the RP2040's
+    libmicroros.a by install.sh (see firmware/macro-ps/micro_ros/README.md).
+    Anything added here therefore costs a micro-ROS library rebuild.
+  </description>
+  <maintainer email="actonc@uw.edu">Colin Acton</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>rosidl_default_generators</buildtool_depend>
+
+  <depend>builtin_interfaces</depend>
+  <depend>std_msgs</depend>
+
+  <exec_depend>rosidl_default_runtime</exec_depend>
+  <member_of_group>rosidl_interface_packages</member_of_group>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

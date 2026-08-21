@@ -349,12 +349,36 @@ ps_interfaces/action/HomeLens.action   goal: (empty)
 *precompiled* — `install.sh` clones it and uses the prebuilt
 `cortex-m0plus` archive. Custom message types are not available to the firmware
 until that library is **rebuilt** with `ps_interfaces` in its type set, via the
-`micro_ros_setup` / `micro_ros_arduino` docker build flow. Standard packages
-already compiled in include `std_msgs`, `std_srvs`, `sensor_msgs`,
-`geometry_msgs`, `control_msgs` and `example_interfaces`, and `rcl_action` /
-`rclc/action_server.h` are present — so actions work today, custom types do not.
+`micro_ros_setup` / `micro_ros_arduino` docker build flow.
 
-This is why §6 sequences the work to get motion proven on stock types first.
+> **Correction.** An earlier revision of this document claimed actions worked on
+> the stock archive and only custom *types* needed a rebuild, and sequenced the
+> work to prove motion on `std_msgs` / `std_srvs` first to defer that cost.
+> That is wrong, and the reason matters.
+>
+> `rcl_action` and `rclc/action_server.h` are indeed compiled in. But upstream
+> builds the `cortex_m0` target — the one the QT Py links — with
+> `colcon_verylowmem.meta`, which sets `RMW_UXRCE_MAX_SERVICES=0`,
+> `MAX_PUBLISHERS=2` and `MAX_SUBSCRIPTIONS=1`. Those size static arrays inside
+> the archive, so no sketch-side `#define` can raise them. The stock archive
+> cannot create **any** service, so even the interim `std_srvs/Trigger` plan was
+> unbuildable; and with `pub_imu` and `/lens/state` the publisher budget is
+> already exhausted before an action server asks for its two.
+>
+> Verified by reading the pool symbols straight out of the shipped archive:
+> ```
+> ar x src/cortex-m0plus/libmicroros.a
+> nm --print-size *.obj | grep -E 'C custom_(publishers|subscriptions|services)'
+> ```
+> against the same symbols in `cortex-m4` (known 10 / 5 / 1) to get the slot
+> sizes: publisher 216 B, subscription 216 B, service 200 B.
+>
+> The rebuild is therefore unavoidable and unconditional, so it is now Phase 1
+> and `ps_interfaces` rides along at no extra cost. `install.sh` performs it
+> automatically and caches it; see `firmware/macro-ps/micro_ros/README.md`.
+
+Standard packages already compiled in include `std_msgs`, `std_srvs`,
+`sensor_msgs`, `geometry_msgs`, `control_msgs` and `example_interfaces`.
 
 ### 4.2 `lens_manager` node
 
@@ -453,24 +477,25 @@ been exercised. Cheapest form: publish it in `/lens/state`, or a distinct
 status-LED pattern at boot. Then drive a fixed test velocity to confirm
 direction, `rms_current` and microstepping against the real mechanism.
 
-**Phase 1 — motion on stock message types.** No `ps_interfaces`, no library
-rebuild. `/lens/command` as `std_msgs/Float32` (velocity, steps/s),
-`/lens/home` as `std_srvs/Trigger`, `/lens/state` as
-`std_msgs/Float32MultiArray` `[position_norm, velocity, status]`. Adds the
-executor, the command path, position-mode termination, stall-during-motion, and
-flash persistence. This is the phase that proves homing end to end.
+**Phase 1 — `ps_interfaces` and the library rebuild.** *Done.* See
+`firmware/macro-ps/micro_ros/README.md`. This was originally sequenced last, on
+the assumption that stock types would let motion be proven first without paying
+for a rebuild. That assumption was wrong — see the correction in §4.1 — so it
+now comes first, because nothing else can be built until it is done.
 
-**Phase 2 — `ps_interfaces` + action.** Create the package, rebuild
-`micro_ros_arduino` with it, swap the phase-1 topics for `LensCommand` /
-`LensState` and the `Trigger` service for the `HomeLens` action with per-phase
-feedback. `lens_manager` gains the retry/latch policy.
+**Phase 2 — motion.** `/lens/command` (`LensCommand`), `/lens/state`
+(`LensState`), `/lens/home` (`HomeLens` action). Adds the executor, the command
+path, position-mode termination, stall-during-motion, and flash persistence.
+This is the phase that proves homing end to end.
 
-**Phase 3 — host polish.** `/lens/ready` gating, `/lens/recalibrate`, launch
-wiring, parameter surface.
+**Phase 3 — host policy.** `lens_manager` with the retry/latch policy,
+`/lens/ready` gating, `/lens/recalibrate`, launch wiring, parameter surface.
 
-Phase 1 is deliberately throwaway at the interface layer. The cost is small and
-it decouples "does the mechanism work" from "is the message package built",
-which are otherwise serialised behind a slow library rebuild.
+There is no longer an interim interface layer to throw away. The earlier plan
+built one on `std_msgs/Float32` + `std_srvs/Trigger` to decouple "does the
+mechanism work" from "is the message package built"; since the rebuild is
+unavoidable either way, that indirection would have cost a throwaway host node
+and firmware branch and bought nothing.
 
 ---
 

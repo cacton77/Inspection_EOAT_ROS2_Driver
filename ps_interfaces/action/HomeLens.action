@@ -1,0 +1,40 @@
+# Calibrate the focus lens by sweeping it to both mechanical limits using
+# StallGuard, then establishing the normalized [0.0, 1.0] travel range.
+#
+# Homing is host-triggered and never runs automatically on power-up: the MCU
+# cannot know whether driving the lens into a stop is safe at that moment.
+# Calibration is persisted to flash, so on a normal reboot the lens comes back
+# IDLE and this action is the exception rather than the rule.
+#
+# The firmware runs the sweep on core 1 alongside step generation; this action
+# server only supervises it, so feedback tracks HomingPhase transitions rather
+# than being emitted on a timer.
+
+# Goal: empty. Homing has no parameters — the sweep velocity, StallGuard
+# threshold and back-off are firmware build-time constants (config.h).
+
+---
+
+# True only if both limits were found and a valid calibration was committed.
+bool success
+
+# Total usable travel between the homed limits, in microsteps. Integral
+# because the firmware tracks limits as int32_t step counts (README section
+# 5.2 says float32; that is a documentation slip, not a wider range).
+int32 range_steps
+
+# Human-readable reason on failure; empty on success.
+string<=64 message
+
+---
+
+# Mirrors the firmware HomingPhase enum in state.h. Note this is offset by one
+# from README section 5.2, which omits PHASE_NONE and so numbers the rest
+# starting at zero.
+uint8 PHASE_NONE = 0
+uint8 PHASE_SEEKING_MAX = 1
+uint8 PHASE_SEEKING_MIN = 2
+uint8 PHASE_ZEROING = 3
+
+uint8 phase
+string<=32 phase_description
