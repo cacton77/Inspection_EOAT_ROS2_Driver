@@ -44,8 +44,12 @@ Cost over the stock `cortex_m0` build is about 4.5 KB of static RAM for the
 entity pools plus roughly 6 KB for the deeper input history — call it 11 KB of
 the RP2040's 264 KB.
 
-**`RCUTILS_NO_64_ATOMIC` ON → OFF.** Despite the name this flag *adds*
-`src/atomic_64bits.c` to micro-ROS's rcutils fork:
+**`RCUTILS_NO_64_ATOMIC` is left ON** (upstream's value). This one is worth
+reading before you change it, because the obvious "fix" is a trap.
+
+Despite the name the flag *adds* `src/atomic_64bits.c` to micro-ROS's rcutils
+fork — it means "this platform has no native 64-bit atomics, supply software
+ones":
 
 ```cmake
 option(RCUTILS_NO_64_ATOMIC "Enable alternative support for 64 bits atomic
@@ -54,10 +58,9 @@ option(RCUTILS_NO_64_ATOMIC "Enable alternative support for 64 bits atomic
 $<$<BOOL:${RCUTILS_NO_64_ATOMIC}>:src/atomic_64bits.c>
 ```
 
-It is meant for platforms without native 64-bit atomics. The RP2040 has them —
-pico-sdk's `pico_atomic` provides `__atomic_{load,store,exchange,fetch_add}_8`
-in `libpico.a(atomic.c.o)` — so enabling it produces four duplicate symbols and
-the link fails:
+pico-sdk *also* supplies `__atomic_{load,store,exchange,fetch_add}_8` in
+`libpico.a(atomic.c.o)`, so with the flag ON both exist and any sketch that
+drags in that object fails to link:
 
 ```
 multiple definition of `__atomic_fetch_add_8';
@@ -65,14 +68,61 @@ multiple definition of `__atomic_fetch_add_8';
 ```
 
 This is latent in the **upstream** archive too (the objects are byte-identical),
-but it only bites once a sketch pulls in enough of rcutils to drag that object
-in — which an action server does and a lone publisher does not. That is why the
-current IMU-only firmware links against the stock archive quite happily and the
-first thing to use `/lens/home` would not have.
+but it only bites once a sketch pulls in enough of rcutils to need that object —
+which an action server does and a lone publisher does not. The IMU-only firmware
+links against the stock archive quite happily.
 
-Turning it off is the correct fix rather than a workaround: pico-sdk's
-implementations are the dual-core-safe ones for this chip, which rcutils'
-generic emulation is not.
+### Do not "fix" this by turning the flag off
+
+Turning it OFF makes the link error disappear, and **breaks the IMU on real
+hardware**: `imu_init()` fails at boot, core 1 traps, and the QT Py sits there
+blinking magenta. Bisected on hardware — same firmware source, three archives:
+
+| archive | `/camera_head/imu` |
+|---|---|
+| upstream stock | 200 Hz |
+| ours, `NO_64_ATOMIC=OFF` | **dead — `begin_I2C()` returns false** |
+| ours, `NO_64_ATOMIC=ON` | 200 Hz |
+
+The two implementations are not equivalent. Disassembled:
+
+- **pico-sdk's** is `bl <lock>` / two `ldr` / `bl <unlock>` — a real **hardware
+  spinlock**, which on RP2040 disables interrupts while held.
+- **rcutils'** hashes the address and spins on a 23-entry byte array with plain
+  `ldrb`/`strb` — no hardware spinlock, and strictly speaking not even atomic on
+  a dual-core M0+.
+
+pico-sdk's is the more *correct* primitive in isolation. The problem is that it
+serialises both cores through one hardware spinlock with interrupts off, while
+core 0 is hammering 64-bit atomics during micro-ROS transport bring-up and core 1
+is concurrently running its first I2C transaction in `setup1()`. The I2C
+transaction loses its timing budget and `Adafruit_I2CDevice::begin()` reports the
+device absent. (The bisect and the disassembly are verified; that last step —
+exactly which contention path blows the timeout — is inference.)
+
+So: keep the flag ON and deal with the duplicate symbol at link time instead.
+
+### Linking a sketch that needs the action server
+
+Add `-Wl,--allow-multiple-definition`:
+
+```bash
+arduino-cli compile --fqbn rp2040:rp2040:adafruit_qtpy \
+  --build-property compiler.c.elf.extra_flags=-Wl,--allow-multiple-definition ...
+```
+
+Verified that this keeps the *working* implementation: arduino-cli links
+`libmicroros.a` ahead of `libpico.a`, so rcutils' definitions win. Confirm it in
+the ELF by size rather than trusting link order — rcutils' are 0x4c-0x54 bytes,
+pico-sdk's 0x16-0x28:
+
+```bash
+nm --print-size --defined-only <sketch>.ino.elf | grep __atomic_.*_8
+```
+
+`install.sh` does **not** pass this flag today, because the current firmware does
+not pull in that object and enabling it globally would mask genuine duplicate
+symbols. Add it when the action server lands.
 
 ## Only an x86_64 host can build this
 
