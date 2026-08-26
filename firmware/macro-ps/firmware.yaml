@@ -27,3 +27,11 @@ micro_ros_library:
   # this file. Each one added costs a full library rebuild.
   extra_packages:
     - ../../ps_interfaces
+
+# The rclc executor drags pico-sdk's libpico.a(atomic.c.o) into the link, which
+# collides with rcutils' own 64-bit atomics in libmicroros.a. Both definitions
+# have to coexist: arduino-cli links libmicroros first, so rcutils' win -- and
+# they must, because pico-sdk's take a hardware spinlock that starves core 1's
+# I2C during boot and stops the IMU coming up. See micro_ros/README.md.
+build_properties:
+  - compiler.c.elf.extra_flags=-Wl,--allow-multiple-definition

@@ -141,20 +141,107 @@
 #define STEPPER_DIR_PIN          4     // GP4 (MI  / D9)
 #define STEPPER_ENABLE_PIN       3     // GP3 (MO  / D10), active HIGH = disabled
 #define STEPPER_PULSE_US         2     // STEP high time
+// Floor on the ISR's re-arm interval. Below this the alarm scheduling overhead
+// starts to dominate the interval itself and the rate stops being honest.
+#define STEPPER_MIN_INTERVAL_US  100
+// Acceleration. A stepper commanded straight from rest to HOMING_VELOCITY is
+// far above its pull-in rate and simply skips — the motor is a NEMA 11 (0.67 A,
+// 12 N.cm), so its margin is thin. Every jog used to start with a step change in
+// rate, which loses sync on the way up and silently desynchronises the open-loop
+// step counter from the mechanism.
+//
+// LENS_START_VELOCITY is the rate the ramp begins at (and stops below), chosen
+// to sit inside the pull-in region; LENS_ACCEL_STEPS_S2 then slews to the
+// commanded rate. 8000 steps/s^2 reaches 1600 steps/s in 200 ms.
+#define LENS_START_VELOCITY      100
+#define LENS_ACCEL_STEPS_S2      8000
 #define TMC_RSENSE               0.11f
 #define TMC_DRIVER_ADDRESS       0b00
-#define TMC_RMS_CURRENT_MA       600
+// The motor is a NEMA 11 rated 0.67 A/phase, and a stepper's rated current is a
+// *peak* per phase, while TMCStepper's rms_current() sets the RMS value. The
+// ceiling is therefore 670 / sqrt(2) = 474 mA RMS. The old 600 was 22% over it,
+// and since the driver holds current at rest that was a permanent overload with
+// nothing moving.
+//
+// The library quantises this anyway: 470 lands on vsense=1, CS=14, i.e.
+// 459 mA RMS / 649 mA peak — just inside the rating.
+//
+// Torque scales with current, so this is ~79% of what STALL_THRESHOLD below was
+// characterised against. See the note there.
+#define TMC_RMS_CURRENT_MA       470
+// Standstill current as a fraction of run current, and how long after the last
+// step the driver waits before dropping to it. Both are the library/silicon
+// defaults, written out because the point of this block is that the behaviour
+// at rest should be deliberate rather than inherited. TPOWERDOWN is in units of
+// 2^18 / f_CLK ~= 22 ms at the internal 12 MHz clock, so 10 is ~0.22 s.
+#define TMC_HOLD_MULTIPLIER      0.5f
+#define TMC_TPOWERDOWN           10
 #define TMC_MICROSTEPS           16
-#define HOMING_VELOCITY          200
-#define LENS_DEFAULT_VELOCITY    500
-#define HOMING_BACKOFF_STEPS     20
-#define STALL_THRESHOLD          50
+// Measured on the rig with the tuner, not guessed. StallGuard4 is strongly
+// velocity-dependent and needs real shaft speed: at 16 microsteps 200 steps/s
+// is only 3.75 RPM, where SG_RESULT free-running medians ~4 and carries no
+// load information at all. Free-travel medians measured across a sweep:
+//
+//     400 steps/s -> 4     1200 -> 68     2000 ->  78
+//     800 steps/s -> 48    1600 -> 64     2400 -> 107
+//
+// 1600 is the sweet spot: the ISR tracks it to 99.8% and the signal is well
+// clear of zero. Note the free-running floor is direction-dependent (24 moving
+// positive, 54 moving negative over 4000-step runs), so the threshold has to
+// clear the *worst* direction.
+#define HOMING_VELOCITY          1600
+#define LENS_DEFAULT_VELOCITY    800
+// At HOMING_VELOCITY the old 20 microsteps was 12 ms of travel — not enough to
+// unload the mechanism after a stall before the next leg starts measuring.
+#define HOMING_BACKOFF_STEPS     200
+// Measured against a real stall at HOMING_VELOCITY, once the acceleration ramp
+// stopped the motor losing sync on every start (before the ramp, SG carried no
+// load information at all and loaded runs read *higher* than free ones).
+//
+//   free travel at 1600 steps/s : 44 - 92   (median 62-88)
+//   driven into the hard stop   : 18 - 20
+//
+// 30 sits between the two with roughly equal margin. The dips into the 20s that
+// appear in the first few samples of a run are ramp/direction-reversal
+// transients, not stalls — HOMING_STALL_GUARD_MS is what masks them, so do not
+// shorten it without re-checking this.
+//
+// Note this is calibrated *at* HOMING_VELOCITY: StallGuard4 here is strongly
+// velocity-dependent (free-travel median 4 at 400 steps/s, 88 at 1600), so
+// changing HOMING_VELOCITY invalidates this number.
+//
+// It was also measured at the old 600 mA RMS. TMC_RMS_CURRENT_MA is now 470,
+// which moves both the free-travel band and the stall floor, so treat 30 as
+// provisional until it is re-measured on the rig with the tuner. Homing has not
+// been run since the current change.
+#define STALL_THRESHOLD          30
+// StallGuard4 only updates while TSTEP <= TCOOLTHRS, and the register powers up
+// at 0 -- which disables it outright. Without this, SG_RESULT reads low noise
+// regardless of load: a velocity sweep on the real mechanism gave a mean of
+// 11-29 across 100-800 steps/s, entirely below STALL_THRESHOLD, so homing would
+// have declared a stall the moment its holdoff expired.
+//
+// TSTEP is f_CLK / microstep_rate with f_CLK ~= 12 MHz internal, so covering
+// 100 steps/s needs TCOOLTHRS >= 120000. Use the full 20-bit range to keep
+// StallGuard valid across the whole jog and homing speed band.
+#define TMC_TCOOLTHRS            0xFFFFF
 // SG_RESULT reads low whenever the motor isn't turning, so a fresh homing leg
 // would "stall" instantly. Ignore StallGuard for this long after each direction
 // change, and don't poll the (slow, blocking) UART read every tick.
 #define HOMING_STALL_GUARD_MS    150
 #define STALL_POLL_MS            10
 #define VEL_WATCHDOG_MS          150
+// Cut the driver's output stage entirely after this long at a standstill. EN is
+// active low and stepper_init() used to assert it at boot and never release it,
+// so the motor sat at TMC_HOLD_MULTIPLIER x run current for as long as the QT Py
+// was powered — heat and wear with nothing moving, and unaffected by stopping
+// the ROS stack.
+//
+// The trade is that a disabled driver has no holding torque, so the open-loop
+// step count is then only as good as the mechanism's friction and the motor's
+// detent torque. Long enough that a burst of jogs never de-energises mid-move,
+// short enough that walking away from the rig doesn't cook the motor.
+#define LENS_IDLE_DISABLE_MS     5000
 #define LENS_POSITION_TOLERANCE  0.005f
 
 // =============================================================================
