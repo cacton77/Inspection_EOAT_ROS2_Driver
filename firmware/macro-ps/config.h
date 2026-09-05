@@ -250,7 +250,26 @@
 // change, and don't poll the (slow, blocking) UART read every tick.
 #define HOMING_STALL_GUARD_MS    150
 #define STALL_POLL_MS            10
-#define VEL_WATCHDOG_MS          150
+// Velocity deadman: hold the lens if a jog stops being refreshed. This is sized
+// against the *transport*, not against how fast the host publishes.
+//
+// It was 150 ms, which at the tuner's 20 Hz command rate is three command
+// periods -- so any three consecutive late commands halted the jog. Measured on
+// the rig: the host publishes at a rock-steady 50.0 ms (max 50.1 ms, zero DDS
+// skips), the MCU's core 0 never blocks more than ~6 ms (the 16-deep 200 Hz IMU
+// queue would drop samples if it did, and it never does), and position seeks --
+// which are exempt from this deadman -- run at a clean 769 of 800 steps/s. Yet
+// commands still reach cb_lens_cmd with recurring 150-200 ms holes on the
+// agent -> USB-CDC -> client leg. Each hole tripped this timer, and because a
+// halt drops ramp_velocity to zero, every trip cost a full re-accelerate: the
+// jog stuttered roughly twice a second and averaged 578 of 800 steps/s.
+//
+// 500 ms is ten command periods, which absorbs every hole measured with room to
+// spare while still stopping the lens within half a second of a genuinely dead
+// publisher. Coasting at LENS_DEFAULT_VELOCITY for the full 500 ms is 400 steps,
+// ~3.6% of the calibrated range -- and the step ISR's soft limits bound it
+// absolutely regardless of what this timer does.
+#define VEL_WATCHDOG_MS          500
 // Cut the driver's output stage entirely after this long at a standstill. EN is
 // active low and stepper_init() used to assert it at boot and never release it,
 // so the motor sat at TMC_HOLD_MULTIPLIER x run current for as long as the MCU

@@ -136,13 +136,23 @@ static void cb_lens_cmd(const void* msgin) {
     if (t > 1.0f) t = 1.0f;
     const int32_t target = lo + (int32_t)lroundf(t * (float)(hi - lo));
 
+    const bool already_there = (target == state.lens_steps);
+
     state.lens_cmd_mode        = LENS_CMD_POSITION;
     state.lens_position_target = t;
     state.lens_target_steps    = target;
-    state.lens_velocity_cmd    = (target > state.lens_steps)
-                                   ? (float)LENS_DEFAULT_VELOCITY
-                                   : -(float)LENS_DEFAULT_VELOCITY;
-    state.mode = (target == state.lens_steps) ? SYS_IDLE : SYS_LENS_MOVING;
+    // Must be zero when we are already on target. stepper_tick() only consults
+    // lens_target_steps while SYS_LENS_MOVING -- both the "reached it" test and
+    // the ISR stop clamp are gated on that mode -- so pairing SYS_IDLE with a
+    // non-zero velocity left nothing at all watching the target: the ramp would
+    // spin up and run the lens to the soft limit. The velocity deadman could
+    // not save it either, since that is gated on SYS_LENS_MOVING as well.
+    state.lens_velocity_cmd    = already_there
+                                   ? 0.0f
+                                   : ((target > state.lens_steps)
+                                        ? (float)LENS_DEFAULT_VELOCITY
+                                        : -(float)LENS_DEFAULT_VELOCITY);
+    state.mode = already_there ? SYS_IDLE : SYS_LENS_MOVING;
   } else {
     state.lens_cmd_mode     = LENS_CMD_VELOCITY;
     state.lens_velocity_cmd = m->value;

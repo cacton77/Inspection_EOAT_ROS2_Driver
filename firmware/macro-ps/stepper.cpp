@@ -459,7 +459,22 @@ void stepper_tick() {
       // dead publisher, so drop to a hold rather than running on a stale
       // command. Deliberately not applied in position mode — that goal is sent
       // once and would be killed 150 ms into the move.
-      if (now_us - last_vel_us > (uint64_t)VEL_WATCHDOG_MS * 1000ULL) {
+      //
+      // Guarded against last_vel_us being NEWER than now_us, which is a normal
+      // outcome rather than an impossible one: now_us is sampled at the top of
+      // this function, and reaching the read above means blocking on
+      // state_mutex -- which core 0 holds precisely while cb_lens_cmd() stamps
+      // a fresh command. Core 1 then resumes holding a now_us from before that
+      // stamp. The plain unsigned subtraction wrapped to ~2^64, which is
+      // trivially greater than any threshold, so the deadman fired on a jog
+      // that was being refreshed perfectly on time. Measured at ~20 Hz command
+      // rate this cost roughly one spurious halt per second, each one a full
+      // stop and re-accelerate -- and it was invisible to threshold tuning,
+      // since an underflow does not care how large VEL_WATCHDOG_MS is.
+      const bool vel_expired =
+          (now_us > last_vel_us) &&
+          (now_us - last_vel_us > (uint64_t)VEL_WATCHDOG_MS * 1000ULL);
+      if (vel_expired) {
         stop_and_idle();
         return;
       }
