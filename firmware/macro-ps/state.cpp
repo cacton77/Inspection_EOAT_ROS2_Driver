@@ -12,4 +12,11 @@ void state_init() {
   state.homing_phase       = HOMING_NONE;
   state.lens_position_norm = 0.0f;
   state.lens_velocity_cmd  = 0.0f;
+  state.lens_cmd_mode      = LENS_CMD_VELOCITY;
+  state.lens_target_steps  = 0;
+  state.driver_ok          = false;
+  state.driver_enabled     = false;
+  state.sg_result          = 0;
+  state.stall_latched      = false;
+  state.lens_cal_request   = LENS_CAL_NONE;
 }

@@ -11,7 +11,9 @@ extra_libraries:
 micro_ros_library:
   # Library target from micro_ros_arduino's library_generation.sh.
   # cortex_m0 -> src/cortex-m0plus/libmicroros.a, which is what the
-  # rp2040:rp2040:adafruit_qtpy FQBN links against.
+  # rp2040:rp2040:adafruit_feather FQBN links against. This is a property of
+  # the RP2040 core, not of the board, so the committed prebuilt archive
+  # survived the QT Py -> Feather move unchanged — no rebuild is needed.
   target: cortex_m0
   # Archive the target produces, relative to the micro_ros_arduino root.
   # install.sh checks for it to confirm the build actually landed.
@@ -27,3 +29,11 @@ micro_ros_library:
   # this file. Each one added costs a full library rebuild.
   extra_packages:
     - ../../ps_interfaces
+
+# The rclc executor drags pico-sdk's libpico.a(atomic.c.o) into the link, which
+# collides with rcutils' own 64-bit atomics in libmicroros.a. Both definitions
+# have to coexist: arduino-cli links libmicroros first, so rcutils' win -- and
+# they must, because pico-sdk's take a hardware spinlock that starves core 1's
+# I2C during boot and stops the IMU coming up. See micro_ros/README.md.
+build_properties:
+  - compiler.c.elf.extra_flags=-Wl,--allow-multiple-definition

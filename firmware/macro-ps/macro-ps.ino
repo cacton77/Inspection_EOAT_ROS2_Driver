@@ -1,4 +1,4 @@
-// Camera Head Controller — macro-PS firmware. Target: Adafruit QT Py RP2040.
+// Camera Head Controller — macro-PS firmware. Target: Adafruit Feather RP2040.
 // Current iteration: LSM6DSOX → /camera_head/imu over USB-CDC micro-ROS,
 // plus the NeoPixel ring/NeoKey renderer and the TMC2209 lens stepper.
 // Joystick, buttons and XVS remain no-op stubs.
@@ -53,7 +53,11 @@ void loop() {
       break;
 
     case AGENT_STATE_CONNECTED:
+      // Service /lens/command before draining, so a stop issued this cycle
+      // reaches core 1 without waiting out an IMU backlog.
+      microros_spin();
       microros_drain_and_publish();
+      microros_publish_lens_state();
       if (now_us - last_ping_us > MICROROS_PING_PERIOD_US) {
         last_ping_us = now_us;
         if (!microros_ping(MICROROS_PING_TIMEOUT_MS)) {

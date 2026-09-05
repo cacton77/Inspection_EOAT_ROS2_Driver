@@ -8,6 +8,8 @@ setup(
     name=package_name,
     version='0.0.0',
     packages=find_packages(exclude=['test']),
+    package_data={package_name: ['*.html']},
+    include_package_data=True,
     data_files=[
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
@@ -30,6 +32,7 @@ setup(
         'console_scripts': [
             'stepper_light_controller_node = inspection_eoat.stepper_light_controller_node:main',
             'imu_processor_node = inspection_eoat.imu_processor_node:main',
+            'lens_tuner_node = inspection_eoat.lens_tuner_node:main',
         ],
     },
 )

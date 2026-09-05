@@ -7,18 +7,38 @@
 
 ### Peripherals
 
+Board: **Adafruit Feather RP2040**, FQBN `rp2040:rp2040:adafruit_feather`.
+
+`firmware/macro-ps/config.h` is the source of truth for every pin below; this
+table is a wiring aid. If the two disagree, config.h is right.
+
 | Peripheral | Interface | Pins | Notes |
 |---|---|---|---|
-| NeoPixel chain (NeoKeys + 3× rings) | PIO (single chain) | GP18 (D18/SCK) | GP16 is onboard NeoPixel — cannot use |
-| TMC2209 stepper driver | UART1 half-duplex + DIR/STEP/EN | GP4/GP5 + GP9/GP10/GP11 | See TMC2209 wiring below |
-| LSM6DSOX IMU | I2C0 via STEMMA QT | GP2 (SDA), GP3 (SCL) | JST-SH cable direct to Feather STEMMA QT port, no additional wiring |
-| Joystick X | ADC0 | GP26 (A0) | 12-bit, center ~2048 |
-| Joystick Y | ADC1 | GP27 (A1) | 12-bit, center ~2048 |
-| Button: PS trigger | GPIO | GP6 (D6) | Pull-up, active low |
-| Button: Mag + | GPIO | GP28 (A2) | Pull-up, active low; used as digital input |
-| Button: Mag − | GPIO | GP29 (A3) | Pull-up, active low; used as digital input |
-| XVS camera sync input | GPIO interrupt | GP12 (D12) | 1.8V→3.3V level shifter required; Pi HQ Camera sync connector |
-| micro-ROS transport | UART0 | GP0 (TX), GP1 (RX) | To Pi 5 GPIO14/15 (ttyAMA0), 1Mbaud, 3.3V direct |
+| NeoPixel chain (NeoKeys + 3× rings) | Bit-banged (Adafruit_NeoPixel) | GP24 (D24) | GP16 is the onboard NeoPixel — cannot use |
+| TMC2209 stepper driver | `Serial1` half-duplex + DIR/STEP/EN | GP0/GP1 + GP26/GP27/GP6 | See TMC2209 wiring below |
+| LSM6DSOX IMU | I2C1 via STEMMA QT (`Wire`) | GP2 (SDA), GP3 (SCL) | JST-SH cable direct to the STEMMA QT port, no additional wiring |
+| Joystick X | ADC2 | GP28 (A2) | 12-bit, center ~2048. Not yet wired |
+| Joystick Y | ADC3 | GP29 (A3) | 12-bit, center ~2048. Not yet wired |
+| NeoKey 1 (Mag +) | GPIO | GP9 (D9) | Pull-up, active low. Not yet wired |
+| NeoKey 2 (Mag −) | GPIO | GP10 (D10) | Pull-up, active low. Not yet wired |
+| NeoKey 3 (PS trigger) | GPIO | GP11 (D11) | Pull-up, active low. Not yet wired |
+| XVS camera sync input | GPIO interrupt | GP12 (D12) | 1.8V→3.3V level shifter required; Pi HQ Camera sync connector. Pin reserved, ISR not implemented |
+| micro-ROS transport | USB-CDC (`Serial`) | USB connector | Not a UART — this is why GP0/GP1 are free for the TMC2209 |
+
+**Stepper pin detail** (DIR/STEP on the ADC-capable pins is deliberate — they
+were the pads free on the harness, and nothing here needs their ADC):
+
+| Signal | GPIO | Feather silk |
+|---|---|---|
+| TMC2209 PDN_UART TX | GP0 | TX |
+| TMC2209 PDN_UART RX | GP1 | RX |
+| DIR | GP26 | A0 |
+| STEP | GP27 | A1 |
+| EN (active low) | GP6 | D4 |
+
+**Unassigned and available:** GP7 (D5), GP8 (D6), GP13 (D13, shared with the
+onboard red LED), GP18 (SCK), GP19 (MO), GP20 (MI), GP25 (D25). This is the
+headroom a quadrature encoder (A/B/I) needs — the QT Py this replaced had none.
 
 **XVS Level Shifting:**
 The Pi HQ Camera (IMX477) XVS sync output is a 1.8V signal. The RP2040 GPIO input high threshold is ~2.3V and will not reliably detect it without level shifting. Use a BSS138-based 1.8V→3.3V shifter (two BSS138 MOSFETs + pull-up resistors) or a dedicated chip such as the TXS0101. The Pi HQ Camera sync connector is a 2-pin JST-SH carrying XVS and GND.
@@ -26,11 +46,19 @@ The Pi HQ Camera (IMX477) XVS sync output is a 1.8V signal. The RP2040 GPIO inpu
 **LSM6DSOX I2C address:** `0x6A` (SA0 low) or `0x6B` (SA0 high).
 
 **Onboard peripherals to avoid:**
-- **GP16** — onboard NeoPixel (status indicator). Must not be used for the external PIO chain.
-- **GP13** — onboard red LED (D13). Do not assign.
-- **GP4** — also wired to BOOTSEL on Feather Rev D and later. Safe for UART1 use after boot; UART1 activity during a reset will not cause problems in practice at 1Mbaud.
+- **GP16** — onboard NeoPixel (status indicator). Must not be used for the external chain.
+- **GP13** — onboard red LED (D13). Usable, but it drives the LED too.
 
-**Pins not broken out on the standard Feather RP2040 header:** GP7, GP8, GP14, GP15, GP17, GP21–GP25. These must not be assigned.
+**Pins not broken out on the Feather RP2040 header:** GP14, GP15, GP17, GP21,
+GP22, GP23. These must not be assigned. (An earlier revision of this table also
+listed GP7, GP8 and GP21–GP25 as unavailable — that was wrong. `variants/
+adafruit_feather/pins_arduino.h` in arduino-pico defines `__PIN_D4 6`,
+`__PIN_D5 7`, `__PIN_D6 8` and `PIN_WIRE1_SDA/SCL 24/25`, all of which are
+header pins. GP6 is **D4**, not D6.)
+
+**`Serial2` is unusable on this board.** The variant pins it to `31u`, i.e. not
+routed. Code that opens it will compile and then sit mute on nothing. The
+TMC2209 UART is `Serial1` (GP0/GP1).
 
 ### NeoPixel Chain Layout
 

@@ -339,11 +339,22 @@ the lens path:
 ```
 ps_interfaces/msg/LensCommand.msg      uint8 mode, float32 value
 ps_interfaces/msg/LensState.msg        float32 position_norm, float32 velocity,
-                                       uint8 status, builtin_interfaces/Time stamp
+                                       uint8 status, int32 steps, uint16 sg_result,
+                                       bool driver_ok, bool driver_enabled,
+                                       builtin_interfaces/Time stamp
 ps_interfaces/action/HomeLens.action   goal: (empty)
-                                       result: bool success, float32 range_steps, string message
+                                       result: bool success, int32 range_steps, string message
                                        feedback: uint8 phase, string phase_description
 ```
+
+`LensState` grew past the minimum during bring-up. `steps` is the raw microstep
+count, meaningful before homing where `position_norm` is not, and it is the
+coordinate the tuner correlates StallGuard against; `sg_result` is that
+StallGuard reading; `driver_ok` reports the TMC2209 answering over UART; and
+`driver_enabled` reports whether the output stage is currently powered, since
+the firmware de-energises it after `LENS_IDLE_DISABLE_MS` and the open-loop
+count has no holding torque behind it while that is false. The `.msg` files are
+the authority — this block is a summary.
 
 **This is the single biggest cost in the plan.** `micro_ros_arduino` ships
 *precompiled* — `install.sh` clones it and uses the prebuilt

@@ -67,7 +67,14 @@ def generate_launch_description():
         executable='micro_ros_agent',
         name='micro_ros_agent',
         output='screen',
-        arguments=['udp4', '--port', '8888', '-v6'],
+        arguments=['udp4', '--port', '8888', '-v2'],   # see macro_ps_agent_node
+    )
+
+    lens_tuner_node = Node(
+        package='inspection_eoat',
+        executable='lens_tuner_node',
+        name='lens_tuner',
+        output='screen',
     )
 
     macro_ps_agent_node = Node(
@@ -75,7 +82,15 @@ def generate_launch_description():
         executable='micro_ros_agent',
         name='macro_ps_agent',
         # output='screen',
-        arguments=['serial', '--dev', '/dev/ttyACM0', '-b', '115200', '-v6'],
+        # Verbosity is a real-time parameter here, not just noise control. At -v6
+        # the agent hex-dumps every message; with the IMU at 200 Hz that is ~220
+        # log records a second, written synchronously to the SD card. A card
+        # flush stalls the agent for long enough to break the /lens/command
+        # stream, and the firmware's 150 ms velocity deadman then halts the jog
+        # and re-ramps -- visible as the lens stuttering mid-jog. It had grown a
+        # 56 GB launch.log before this was caught, and raising the host command
+        # rate made the stutter worse rather than better, which is the tell.
+        arguments=['serial', '--dev', '/dev/ttyACM0', '-b', '115200', '-v2'],
     )
 
     imu_processor_node = Node(
@@ -90,6 +105,7 @@ def generate_launch_description():
         # d405_camera_node,
         # pi_camera_node,
         # turntable_agent_node,
+        lens_tuner_node,
         macro_ps_agent_node,
         # imu_processor_node,
     ])

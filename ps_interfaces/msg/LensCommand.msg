@@ -17,5 +17,19 @@ uint8 MODE_VELOCITY = 0
 # Requires a valid calibration: rejected while UNCALIBRATED, STALLED or HOMING.
 uint8 MODE_POSITION = 1
 
+# Record the lens's current position as the minimum and rezero the step
+# counter there, so the minimum is always step 0. Also clears any latched
+# stall and invalidates the recorded maximum, since a new origin makes the old
+# far end meaningless. `value` is ignored.
+#
+# Manual alternative to homing, for a mechanism where sensorless homing is not
+# available. Accepted while UNCALIBRATED or STALLED; rejected while HOMING.
+uint8 MODE_SET_MIN = 2
+
+# Record the lens's current position as the maximum. `value` is ignored.
+# Only meaningful after MODE_SET_MIN: the range is invalid, and position seeks
+# stay rejected, until the maximum is above the minimum.
+uint8 MODE_SET_MAX = 3
+
 uint8 mode
 float32 value

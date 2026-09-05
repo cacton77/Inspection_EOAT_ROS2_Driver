@@ -4,21 +4,30 @@
 // =============================================================================
 // Board target
 // =============================================================================
-// Adafruit QT Py RP2040 — FQBN rp2040:rp2040:adafruit_qtpy.
+// Adafruit Feather RP2040 — FQBN rp2040:rp2040:adafruit_feather.
 // Stepper driver is a BIGTREETECH TMC2209 step-stick.
 //
 // Every pin number below is an RP2040 GPIO, not an Arduino alias, except
-// JOYSTICK_X/Y_PIN which are deliberately the A0/A1 aliases.
+// JOYSTICK_X/Y_PIN which are deliberately the A2/A3 aliases.
+//
+// Broken out on the Feather header and unassigned after everything below:
+// GP7 (D5), GP8 (D6), GP13 (D13, shared with the onboard red LED), GP18 (SCK),
+// GP19 (MO), GP20 (MI), GP25 (D25). The QT Py had none — this is what makes a
+// quadrature encoder (A/B/I) and the XVS input possible on this board.
+//
+// Not brought out at all: GP14, GP15, GP17, GP21, GP22, GP23. GP16 is the
+// onboard NeoPixel. Do not assign any of them.
 
 // =============================================================================
 // I2C — LSM6DSOX over STEMMA QT
 // =============================================================================
-// The QT Py routes its STEMMA QT connector to Wire1 (GP22/GP23), unlike the
-// Feather where it was the default Wire. imu.cpp must use Wire1 on this board.
-// Wire's default pads (GP24/GP25) carry the NeoPixel chain and NeoKey 3 here,
-// so nothing may call Wire.begin().
-#define I2C_SDA_PIN              22
-#define I2C_SCL_PIN              23
+// The Feather routes its STEMMA QT connector to the default Wire (GP2/GP3),
+// which is the same pair as the SDA/SCL header pins. This is the reverse of
+// the QT Py, where it was Wire1 on GP22/GP23 — imu.cpp must use Wire here.
+// Wire1 does exist on this variant, but on GP24/GP25, and GP24 carries the
+// NeoPixel chain, so nothing may call Wire1.begin().
+#define I2C_SDA_PIN              2
+#define I2C_SCL_PIN              3
 
 // =============================================================================
 // IMU (LSM6DSOX)
@@ -47,11 +56,13 @@
 // =============================================================================
 // Onboard status LED (board-dependent, used to visualise micro-ROS agent state)
 // =============================================================================
-// QT Py RP2040: single NeoPixel data on GP12, with a power-enable on GP11 that
-// must be driven HIGH before the pixel responds. status_led_init() does that
-// for any STATUS_LED_POWER_PIN >= 0, so setting it here is the whole change.
-#define STATUS_LED_PIN            12
-#define STATUS_LED_POWER_PIN      11
+// Feather RP2040: single NeoPixel data on GP16, permanently powered. There is
+// no power-enable pin, so STATUS_LED_POWER_PIN is -1 and status_led_init()
+// skips the enable write it had to make for the QT Py's GP11.
+//
+// Freeing GP12 is the point of the move: it is the XVS input again (below).
+#define STATUS_LED_PIN            16
+#define STATUS_LED_POWER_PIN      -1
 #define STATUS_LED_BRIGHTNESS     40
 #define STATUS_LED_TICK_HZ        10
 
@@ -102,7 +113,7 @@
 // =============================================================================
 // LED ring + NeoKeys (external NeoPixel chain — separate from the status LED)
 // =============================================================================
-#define NEOPIXEL_DATA_PIN        24    // GP24 (SDA / D4)
+#define NEOPIXEL_DATA_PIN        24    // GP24 (D24) — same GPIO as on the QT Py
 #define LED_TICK_HZ              50    // render/compare rate; show() only on change
 #define NUM_NEOKEYS              3
 #define NUM_RING_INNER           16
@@ -130,38 +141,138 @@
 // =============================================================================
 // Stepper / lens — TMC2209 over UART
 // =============================================================================
-// The TMC2209's PDN_UART lands on the QT Py's TX (GP20) / RX (GP5) pads. In
-// arduino-pico's adafruit_qtpy variant those pads are Serial2, not Serial1
-// (Serial1 defaults to GP28/GP29, which are the joystick's A1/A0). Keeping the
-// physical pins from the wiring table therefore means using Serial2 — the
-// object name differs from the hardware UART number and that is expected.
-#define TMC_SERIAL               Serial2
+// The TMC2209's PDN_UART lands on the Feather's TX (GP0) / RX (GP1) pads,
+// which arduino-pico's adafruit_feather variant maps to Serial1 (UART0). On
+// the QT Py the same signals sat on GP20/GP5 and were Serial2; the object name
+// tracks the variant rather than the hardware UART number, which is why it
+// changes with the board.
+//
+// Serial2 must NOT be used here: the variant pins it to 31u (not brought out),
+// so it would compile and then be silently dead. stepper.cpp pins Serial1 to
+// TMC_UART_TX/RX_PIN explicitly so a wrong build target fails loudly instead.
+//
+// UART0 is free for this because micro-ROS runs over USB-CDC (`Serial`), not
+// over the header UART.
+#define TMC_SERIAL               Serial1
+#define TMC_UART_TX_PIN          0     // GP0 (TX)
+#define TMC_UART_RX_PIN          1     // GP1 (RX)
 #define TMC_UART_BAUD            500000
-#define STEPPER_STEP_PIN         6     // GP6 (SCK / D8)
-#define STEPPER_DIR_PIN          4     // GP4 (MI  / D9)
-#define STEPPER_ENABLE_PIN       3     // GP3 (MO  / D10), active HIGH = disabled
+#define STEPPER_STEP_PIN         27    // GP27 (A1)
+#define STEPPER_DIR_PIN          26    // GP26 (A0)
+#define STEPPER_ENABLE_PIN       6     // GP6  (D4), active HIGH = disabled
 #define STEPPER_PULSE_US         2     // STEP high time
+// Floor on the ISR's re-arm interval. Below this the alarm scheduling overhead
+// starts to dominate the interval itself and the rate stops being honest.
+#define STEPPER_MIN_INTERVAL_US  100
+// Acceleration. A stepper commanded straight from rest to HOMING_VELOCITY is
+// far above its pull-in rate and simply skips — the motor is a NEMA 11 (0.67 A,
+// 12 N.cm), so its margin is thin. Every jog used to start with a step change in
+// rate, which loses sync on the way up and silently desynchronises the open-loop
+// step counter from the mechanism.
+//
+// LENS_START_VELOCITY is the rate the ramp begins at (and stops below), chosen
+// to sit inside the pull-in region; LENS_ACCEL_STEPS_S2 then slews to the
+// commanded rate. 8000 steps/s^2 reaches 1600 steps/s in 200 ms.
+#define LENS_START_VELOCITY      100
+#define LENS_ACCEL_STEPS_S2      8000
 #define TMC_RSENSE               0.11f
 #define TMC_DRIVER_ADDRESS       0b00
-#define TMC_RMS_CURRENT_MA       600
+// The motor is a NEMA 11 rated 0.67 A/phase, and a stepper's rated current is a
+// *peak* per phase, while TMCStepper's rms_current() sets the RMS value. The
+// ceiling is therefore 670 / sqrt(2) = 474 mA RMS. The old 600 was 22% over it,
+// and since the driver holds current at rest that was a permanent overload with
+// nothing moving.
+//
+// The library quantises this anyway: 470 lands on vsense=1, CS=14, i.e.
+// 459 mA RMS / 649 mA peak — just inside the rating.
+//
+// Torque scales with current, so this is ~79% of what STALL_THRESHOLD below was
+// characterised against. See the note there.
+#define TMC_RMS_CURRENT_MA       470
+// Standstill current as a fraction of run current, and how long after the last
+// step the driver waits before dropping to it. Both are the library/silicon
+// defaults, written out because the point of this block is that the behaviour
+// at rest should be deliberate rather than inherited. TPOWERDOWN is in units of
+// 2^18 / f_CLK ~= 22 ms at the internal 12 MHz clock, so 10 is ~0.22 s.
+#define TMC_HOLD_MULTIPLIER      0.5f
+#define TMC_TPOWERDOWN           10
 #define TMC_MICROSTEPS           16
-#define HOMING_VELOCITY          200
-#define LENS_DEFAULT_VELOCITY    500
-#define HOMING_BACKOFF_STEPS     20
-#define STALL_THRESHOLD          50
+// Measured on the rig with the tuner, not guessed. StallGuard4 is strongly
+// velocity-dependent and needs real shaft speed: at 16 microsteps 200 steps/s
+// is only 3.75 RPM, where SG_RESULT free-running medians ~4 and carries no
+// load information at all. Free-travel medians measured across a sweep:
+//
+//     400 steps/s -> 4     1200 -> 68     2000 ->  78
+//     800 steps/s -> 48    1600 -> 64     2400 -> 107
+//
+// 1600 is the sweet spot: the ISR tracks it to 99.8% and the signal is well
+// clear of zero. Note the free-running floor is direction-dependent (24 moving
+// positive, 54 moving negative over 4000-step runs), so the threshold has to
+// clear the *worst* direction.
+#define HOMING_VELOCITY          1600
+#define LENS_DEFAULT_VELOCITY    800
+// At HOMING_VELOCITY the old 20 microsteps was 12 ms of travel — not enough to
+// unload the mechanism after a stall before the next leg starts measuring.
+#define HOMING_BACKOFF_STEPS     200
+// Measured against a real stall at HOMING_VELOCITY, once the acceleration ramp
+// stopped the motor losing sync on every start (before the ramp, SG carried no
+// load information at all and loaded runs read *higher* than free ones).
+//
+//   free travel at 1600 steps/s : 44 - 92   (median 62-88)
+//   driven into the hard stop   : 18 - 20
+//
+// 30 sits between the two with roughly equal margin. The dips into the 20s that
+// appear in the first few samples of a run are ramp/direction-reversal
+// transients, not stalls — HOMING_STALL_GUARD_MS is what masks them, so do not
+// shorten it without re-checking this.
+//
+// Note this is calibrated *at* HOMING_VELOCITY: StallGuard4 here is strongly
+// velocity-dependent (free-travel median 4 at 400 steps/s, 88 at 1600), so
+// changing HOMING_VELOCITY invalidates this number.
+//
+// It was also measured at the old 600 mA RMS. TMC_RMS_CURRENT_MA is now 470,
+// which moves both the free-travel band and the stall floor, so treat 30 as
+// provisional until it is re-measured on the rig with the tuner. Homing has not
+// been run since the current change.
+#define STALL_THRESHOLD          30
+// StallGuard4 only updates while TSTEP <= TCOOLTHRS, and the register powers up
+// at 0 -- which disables it outright. Without this, SG_RESULT reads low noise
+// regardless of load: a velocity sweep on the real mechanism gave a mean of
+// 11-29 across 100-800 steps/s, entirely below STALL_THRESHOLD, so homing would
+// have declared a stall the moment its holdoff expired.
+//
+// TSTEP is f_CLK / microstep_rate with f_CLK ~= 12 MHz internal, so covering
+// 100 steps/s needs TCOOLTHRS >= 120000. Use the full 20-bit range to keep
+// StallGuard valid across the whole jog and homing speed band.
+#define TMC_TCOOLTHRS            0xFFFFF
 // SG_RESULT reads low whenever the motor isn't turning, so a fresh homing leg
 // would "stall" instantly. Ignore StallGuard for this long after each direction
 // change, and don't poll the (slow, blocking) UART read every tick.
 #define HOMING_STALL_GUARD_MS    150
 #define STALL_POLL_MS            10
 #define VEL_WATCHDOG_MS          150
+// Cut the driver's output stage entirely after this long at a standstill. EN is
+// active low and stepper_init() used to assert it at boot and never release it,
+// so the motor sat at TMC_HOLD_MULTIPLIER x run current for as long as the MCU
+// was powered — heat and wear with nothing moving, and unaffected by stopping
+// the ROS stack.
+//
+// The trade is that a disabled driver has no holding torque, so the open-loop
+// step count is then only as good as the mechanism's friction and the motor's
+// detent torque. Long enough that a burst of jogs never de-energises mid-move,
+// short enough that walking away from the rig doesn't cook the motor.
+#define LENS_IDLE_DISABLE_MS     5000
 #define LENS_POSITION_TOLERANCE  0.005f
 
 // =============================================================================
 // Joystick (stub — pin defines only)
 // =============================================================================
-#define JOYSTICK_X_PIN           A0    // GP29 on the QT Py
-#define JOYSTICK_Y_PIN           A1    // GP28 on the QT Py
+// A0/A1 (GP26/GP27) are the stepper's DIR/STEP on this board, so the joystick
+// moves to the other two ADC channels. Nothing reads these yet — the axes are
+// unwired, so confirm the mapping against the harness before joystick.cpp
+// lands rather than assuming it carried over.
+#define JOYSTICK_X_PIN           A2    // GP28 on the Feather
+#define JOYSTICK_Y_PIN           A3    // GP29 on the Feather
 #define JOYSTICK_DEADZONE        0.05f
 #define SIGMA_A                  0.5236f   // ~M_PI/6
 #define SIGMA_R                  0.15f
@@ -169,25 +280,32 @@
 // =============================================================================
 // NeoKey switches (stub — pin defines only)
 // =============================================================================
-// Digital inputs, internal pullup, active LOW. These replace the Feather's
-// BUTTON_PS_PIN / BUTTON_MAG_PLUS_PIN / BUTTON_MAG_MINUS_PIN.
+// Digital inputs, internal pullup, active LOW. These supersede the original
+// BUTTON_PS_PIN / BUTTON_MAG_PLUS_PIN / BUTTON_MAG_MINUS_PIN names.
 //
 // Note the switch numbering is chain order, not function order: the NeoKey
 // pixel indices above put PS first (IDX_NEOKEY_PS == 0), while the switch
-// wiring carried over from the Feather makes NEOKEY_1 = Mag+, NEOKEY_2 = Mag-,
-// NEOKEY_3 = PS. buttons.cpp owns that mapping when it lands.
-#define NEOKEY_1_PIN             27    // GP27 (A2 / D2)
-#define NEOKEY_2_PIN             26    // GP26 (A3 / D3)
-#define NEOKEY_3_PIN             25    // GP25 (SCL / D5)
+// numbering makes NEOKEY_1 = Mag+, NEOKEY_2 = Mag-, NEOKEY_3 = PS.
+// buttons.cpp owns that mapping when it lands.
+// Moved off the QT Py's GP25/26/27: GP26 and GP27 are now the stepper. Also
+// unwired at present, so these are a proposal to build the harness against,
+// not a record of existing wiring.
+#define NEOKEY_1_PIN             9     // GP9  (D9)
+#define NEOKEY_2_PIN             10    // GP10 (D10)
+#define NEOKEY_3_PIN             11    // GP11 (D11)
 #define BUTTON_DEBOUNCE_MS       10
 #define MAG_STEP                 0.05f
 
 // =============================================================================
-// XVS camera sync (stub — no GPIO available)
+// XVS camera sync (stub — pin reserved, ISR still unimplemented)
 // =============================================================================
-// The QT Py has no free pin for XVS: GP12 (the Feather's XVS pin) is the
-// onboard NeoPixel here. XVS_PIN is intentionally absent; the timing constants
-// are kept for whenever the signal can be routed.
+// GP12 is available again: it was the onboard NeoPixel on the QT Py, which is
+// why XVS_PIN was intentionally absent there. The pin is reserved here, but
+// xvs_stub.h still has an empty xvs_init() — routing the signal is no longer
+// the blocker, writing the interrupt handler is.
+//
+// The signal is 1.8 V from the HQ camera and needs a level shifter to 3.3 V.
+#define XVS_PIN                  12    // GP12 (D12)
 #define XVS_TIMEOUT_US           200000
 #define RING_SETTLE_MS           5
 
