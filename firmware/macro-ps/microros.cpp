@@ -109,16 +109,20 @@ static void cb_lens_cmd(const void* msgin) {
     return;
   }
 
-  // Manual range calibration (MODE_SET_MIN = 2, MODE_SET_MAX = 3). Compared
-  // against literals rather than the generated constants on purpose: the
-  // committed libmicroros.a predates them, and since a .msg constant changes
-  // no field and no wire format, rebuilding that archive just to import two
-  // names would cost a full cross-compile and buy nothing. The host-side
-  // ps_interfaces build does carry the named constants -- see LensCommand.msg.
+  // Manual range calibration. These used to be compared against the literals
+  // 2 and 3, because the committed libmicroros.a predated the constants and a
+  // .msg constant changes no field and no wire format -- so a full
+  // cross-compile bought nothing but two names. That archive has since been
+  // rebuilt (it had to be, for install.sh's stamp to match the interface
+  // definitions on a fresh host), so the generated constants are available and
+  // the literals no longer have to be kept in sync by hand.
   //
   // Only recorded here; stepper_tick() on core 1 performs it.
-  if (m->mode == 2 || m->mode == 3) {
-    state.lens_cal_request  = (m->mode == 2) ? LENS_CAL_SET_MIN : LENS_CAL_SET_MAX;
+  if (m->mode == ps_interfaces__msg__LensCommand__MODE_SET_MIN ||
+      m->mode == ps_interfaces__msg__LensCommand__MODE_SET_MAX) {
+    state.lens_cal_request  =
+        (m->mode == ps_interfaces__msg__LensCommand__MODE_SET_MIN)
+          ? LENS_CAL_SET_MIN : LENS_CAL_SET_MAX;
     state.lens_velocity_cmd = 0.0f;
     mutex_exit(&state_mutex);
     return;
