@@ -33,6 +33,8 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPo
 
 from ps_interfaces.msg import LedRingCommand, LedRingState, LensCommand, LensState
 
+from . import ring_spot
+
 STATUS_NAMES = {
     LensState.STATUS_UNCALIBRATED: 'UNCALIBRATED',
     LensState.STATUS_IDLE: 'IDLE',
@@ -104,6 +106,12 @@ class LensTuner(Node):
         # LED frame has nothing to recover it: the ring would just sit on the
         # previous pattern until the next user action.
         self.declare_parameter('led_republish_hz', 2.0)
+        # Which way pixel index advances from the downward zero. This cannot be
+        # derived -- it is how the strands were physically routed -- and getting
+        # it wrong mirrors every pattern about the vertical axis. The tuner's
+        # canvas draws the live readback at the computed coordinates so a wrong
+        # value shows up immediately instead of staying subtly wrong.
+        self.declare_parameter('ring_clockwise', False)
 
         state_topic = self.get_parameter('state_topic').value
         cmd_topic = self.get_parameter('command_topic').value
@@ -168,6 +176,14 @@ class LensTuner(Node):
         self.ring_pixels = RING_PIXELS_NOMINAL
         self.led_frame = [0] * self.ring_pixels
         self.led_neokeys = [0] * NUM_NEOKEYS
+        # Spatial (Gaussian spot) controller. Lives here rather than on the MCU:
+        # the firmware is a dumb indexed renderer with no spatial model at all.
+        # The maths is in ring_spot so a future shadow-compensation node imports
+        # it rather than growing a second, drifting copy.
+        self.ring_clockwise = bool(self.get_parameter('ring_clockwise').value)
+        self.spot_positions = ring_spot.pixel_positions(clockwise=self.ring_clockwise)
+        self.spot = None          # last (x, y, sigma, amplitude, color), or None
+        self.spot_meta = {}
         self.led_shown = None
         self.led_shown_keys = None
         self.led_state_stamp = 0.0
@@ -374,6 +390,66 @@ class LensTuner(Node):
         msg.neokey_colors = keys
         self.led_pub.publish(msg)
 
+    def set_spot(self, payload):
+        """Place a Gaussian spot, in millimetres, and publish the frame.
+
+        Four numbers stand in for 72: position (x, y), width (sigma) and total
+        flux (amplitude). Amplitude is flux rather than peak brightness by
+        design -- see ring_spot -- so narrowing sigma concentrates the same
+        light instead of also dimming it, and a compensation controller is not
+        chasing an exposure change it never asked for.
+        """
+        try:
+            x = float(payload.get('x', 0.0))
+            y = float(payload.get('y', 0.0))
+            sigma = float(payload.get('sigma', 20.0))
+            amp = float(payload.get('amplitude', 0.01))
+            color = payload.get('color', '#ffffff')
+            packed = _packed(color)
+            rgb = ((packed >> 16) & 0xFF, (packed >> 8) & 0xFF, packed & 0xFF)
+        except (TypeError, ValueError):
+            return False, 'could not parse a spot parameter'
+
+        with self.lock:
+            n = self.ring_pixels
+            positions = self.spot_positions
+        if n != len(positions):
+            # The firmware is driving a cut-down chain (bring-up). The spot model
+            # describes the full ring, so refuse rather than silently painting a
+            # pattern whose geometry does not match what is lit.
+            return False, (f'spot needs the full {len(positions)}-pixel ring; '
+                           f'firmware is driving {n}')
+
+        frame, meta = ring_spot.render_spot(positions, x, y, sigma, amp, rgb)
+
+        note = ''
+        if meta['clipped']:
+            note = (f" -- CLIPPED on {meta['clipped']} px, emitted "
+                    f"{meta['achieved']:.4f} not {amp:.4f}; max flux at this "
+                    f"sigma is {meta['headroom']:.4f}")
+        with self.lock:
+            self.led_frame = frame
+            self.led_neokeys = [0] * NUM_NEOKEYS
+            self.spot = {'x': x, 'y': y, 'sigma': sigma, 'amplitude': amp,
+                         'color': '#%06x' % packed}
+            self.spot_meta = meta
+            self.last_event = (f'spot ({x:+.0f},{y:+.0f}) mm  sigma {sigma:.0f}  '
+                               f'flux {meta["achieved"]:.4f}{note}')
+        self._publish_led()
+        return True, self.last_event
+
+    def led_geometry(self):
+        """Pixel coordinates and limits, for the UI canvas. Fetched once."""
+        return {
+            'positions': [[round(x, 3), round(y, 3)] for x, y in self.spot_positions],
+            'rings': [{'name': nm, 'count': c, 'radius': r}
+                      for nm, c, r in ring_spot.RINGS],
+            'clockwise': self.ring_clockwise,
+            'sigma_min': round(ring_spot.SIGMA_MIN_MM, 2),
+            'sigma_max': ring_spot.SIGMA_MAX_MM,
+            'pixel_pitch': round(ring_spot.PIXEL_PITCH_MM, 2),
+        }
+
     def set_led(self, payload):
         """Build a whole ring frame from a UI request and publish it.
 
@@ -420,6 +496,8 @@ class LensTuner(Node):
         with self.lock:
             self.led_frame = frame
             self.led_neokeys = [ps, 0, 0]
+            self.spot = None
+            self.spot_meta = {}
             lit = sum(1 for c in frame if c)
             self.last_event = f'led {mode}: {lit}/{n} ring px lit'
         self._publish_led()
@@ -448,6 +526,8 @@ class LensTuner(Node):
                     'shown_neokeys': self.led_shown_keys,
                     'shown_stale': ((time.time() - self.led_state_stamp) > 1.0
                                     if self.led_shown is not None else True),
+                    'spot': self.spot,
+                    'spot_meta': self.spot_meta,
                 },
                 # Recent tail for the plot; the browser keeps no history of its own
                 # so a page reload still shows the run.
@@ -495,6 +575,8 @@ def _make_handler(node: 'LensTuner'):
                     self._send(500, 'UI file missing', 'text/plain')
             elif self.path == '/api/state':
                 self._send(200, json.dumps(node.snapshot()))
+            elif self.path == '/api/led/geometry':
+                self._send(200, json.dumps(node.led_geometry()))
             elif self.path == '/api/log.csv':
                 self._send(200, node.csv(), 'text/csv',
                            {'Content-Disposition': 'attachment; filename="lens_sg_log.csv"'})
@@ -524,6 +606,9 @@ def _make_handler(node: 'LensTuner'):
             elif self.path == '/api/clear':
                 node.clear_log()
                 self._send(200, json.dumps({'ok': True}))
+            elif self.path == '/api/spot':
+                ok, msg = node.set_spot(payload)
+                self._send(200 if ok else 400, json.dumps({'ok': ok, 'message': msg}))
             elif self.path == '/api/led':
                 ok, msg = node.set_led(payload)
                 self._send(200 if ok else 400, json.dumps({'ok': ok, 'message': msg}))

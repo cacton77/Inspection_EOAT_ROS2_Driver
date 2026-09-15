@@ -2,49 +2,31 @@
 
 #include <Arduino.h>
 #include <Adafruit_NeoPixel.h>
-#include <math.h>
 #include <string.h>
 
 #include "config.h"
 #include "state.h"
 
-// Chain layout (config.h): [0..2] NeoKeys, [3..74] ring pixels.
+// Chain layout (config.h): NUM_NEOKEYS keys first, then the ring pixels.
 static Adafruit_NeoPixel strip(NUM_PIXELS_TOTAL, NEOPIXEL_DATA_PIN,
                                NEO_GRB + NEO_KHZ800);
 
 // -----------------------------------------------------------------------------
-// Polar lookup table (README §4.2)
+// Ring index -> chain index
 // -----------------------------------------------------------------------------
-// Each ring pixel carries a physical angle and a radius normalised to the outer
-// ring, so joystick magnitude maps to a physically meaningful radius rather
-// than an arbitrary ring index.
-struct LedPolar {
-  float    angle_rad;     // [0, 2*pi), evenly spaced within each ring
-  float    radius_norm;   // physical radius / 92 mm
-  uint16_t chain_index;   // index into the strip buffer
-};
-
-static LedPolar led_table[NUM_RING_PIXELS];
-
-static void build_led_table() {
-  // Physical assumption: pixel 0 of every ring is aligned at 0 radians, and all
-  // three rings share that alignment. If a ring is ever remounted at a
-  // different physical rotation, add a per-ring angle offset here rather than
-  // touching the Gaussian mapping.
-  const struct { int n; float r; int offset; } rings[3] = {
-    { NUM_RING_INNER, RADIUS_INNER, OFFSET_INNER },
-    { NUM_RING_MID,   RADIUS_MID,   OFFSET_MID   },
-    { NUM_RING_OUTER, RADIUS_OUTER, OFFSET_OUTER },
-  };
-
-  for (int ring = 0; ring < 3; ring++) {
-    for (int i = 0; i < rings[ring].n; i++) {
-      LedPolar &e  = led_table[rings[ring].offset - OFFSET_INNER + i];
-      e.angle_rad   = (2.0f * (float)M_PI * (float)i) / (float)rings[ring].n;
-      e.radius_norm = rings[ring].r;
-      e.chain_index = (uint16_t)(rings[ring].offset + i);
-    }
-  }
+// The three rings are contiguous and sit immediately after the NeoKeys, so this
+// is the whole mapping. It used to go through a polar lookup table carrying a
+// physical angle and radius per pixel, which existed only to feed an on-board
+// 2D Gaussian driven by a local joystick.
+//
+// Both are gone. Spatial control is a host concern now: a node on the Pi owns
+// the geometry and the Gaussian (see inspection_eoat/ring_spot.py) and sends
+// indexed frames, and the joystick will land on the Pi rather than the Feather.
+// Keeping a second spatial model here would have meant two definitions of where
+// pixel 0 points -- and this one was wrong, since it assumed 0 rad was 3
+// o'clock where the rig actually indexes from straight down.
+static inline uint16_t ring_chain_index(int i) {
+  return (uint16_t)(OFFSET_INNER + i);
 }
 
 // -----------------------------------------------------------------------------
@@ -60,42 +42,15 @@ static inline uint32_t rgb(uint8_t r, uint8_t g, uint8_t b) {
   return ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
 }
 
-// -----------------------------------------------------------------------------
-// Joystick override — integration point, not yet live
-// -----------------------------------------------------------------------------
-// joystick.cpp will set these three from the ADC read. Until then
-// joystick_active is permanently false and the ring follows /led_ring/command.
-static bool  joystick_active    = false;
-static float joystick_angle     = 0.0f;   // [-pi, pi]
-static float joystick_magnitude = 0.0f;   // [0, 1] -> radius_norm
-
-// 2D Gaussian in (dtheta, dr) space (README §4.2). Angle picks the azimuth,
-// magnitude picks which ring(s) light up.
-static void render_ring_gaussian(float angle, float magnitude) {
-  for (int i = 0; i < NUM_RING_PIXELS; i++) {
-    // Angular distance, wrapped to [-pi, pi]
-    float dtheta = angle - led_table[i].angle_rad;
-    dtheta = atan2f(sinf(dtheta), cosf(dtheta));
-
-    const float dr = magnitude - led_table[i].radius_norm;
-
-    const float weight = expf(-(dtheta * dtheta) / (2.0f * SIGMA_A * SIGMA_A)
-                              -(dr     * dr)     / (2.0f * SIGMA_R * SIGMA_R));
-
-    const uint8_t v = (uint8_t)(weight * 255.0f);
-    frame[led_table[i].chain_index] = rgb(v, v, v);
-  }
-}
-
 static void render_ring_from_command(const uint32_t ring_colors[NUM_RING_PIXELS]) {
   for (int i = 0; i < NUM_RING_PIXELS; i++) {
-    frame[led_table[i].chain_index] = ring_colors[i];
+    frame[ring_chain_index(i)] = ring_colors[i];
   }
 }
 
 static void render_ring_blank() {
   for (int i = 0; i < NUM_RING_PIXELS; i++) {
-    frame[led_table[i].chain_index] = 0;
+    frame[ring_chain_index(i)] = 0;
   }
 }
 
@@ -148,8 +103,6 @@ static void render_neokey_homing(HomingPhase phase, bool blink_on) {
 // Public API
 // -----------------------------------------------------------------------------
 bool led_init() {
-  build_led_table();
-
   strip.begin();
   if (strip.getPixels() == nullptr) {
     return false;   // buffer allocation failed
@@ -213,13 +166,9 @@ void led_tick() {
     case SYS_LENS_MOVING:
     case SYS_UNCALIBRATED:
     default:
-      if (joystick_active) {
-        // Local joystick control pre-empts the ROS-commanded ring and
-        // deliberately does not publish to /led_ring/state.
-        render_ring_gaussian(joystick_angle, joystick_magnitude);
-      } else {
-        render_ring_from_command(ring_colors);
-      }
+      // Nothing local pre-empts the ring any more -- the host owns every
+      // pattern, spatial ones included -- so this is unconditional.
+      render_ring_from_command(ring_colors);
       // Nothing local drives the PS key outside a capture, so it follows
       // whatever /led_ring/command last asked for.
 #if NUM_NEOKEYS >= 3
@@ -246,11 +195,10 @@ void led_tick() {
     // against core 0's executor.
     //
     // Indexed in ring order (inner, mid, outer) rather than chain order, to
-    // match LedRingCommand.colors — led_table carries that mapping, so go
-    // through it rather than assuming the two differ by a constant offset.
+    // match LedRingCommand.colors. ring_chain_index() is that mapping.
     mutex_enter_blocking(&state_mutex);
     for (int i = 0; i < NUM_RING_PIXELS; i++) {
-      state.shown_ring_colors[i] = frame[led_table[i].chain_index];
+      state.shown_ring_colors[i] = frame[ring_chain_index(i)];
     }
     for (int i = 0; i < NUM_NEOKEYS; i++) {
       state.shown_neokey_colors[i] = frame[i];

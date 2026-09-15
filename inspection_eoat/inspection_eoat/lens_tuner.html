@@ -41,6 +41,9 @@
   .ledwalk{display:grid;grid-template-columns:auto 1fr auto;gap:8px;margin:4px 0 10px}
   input[type=color]{width:100%;height:34px;background:#0f1218;border:1px solid var(--line);
          border-radius:6px;padding:2px;cursor:pointer}
+  .spotwrap{display:grid;grid-template-columns:340px 1fr;gap:18px;align-items:start}
+  @media(max-width:760px){.spotwrap{grid-template-columns:1fr}}
+  #spotcv{width:340px;height:340px;max-width:100%;cursor:crosshair;touch-action:none}
   .note{color:var(--dim);font-size:12px;margin-top:10px}
   .bad{color:var(--bad)} .ok{color:var(--ok)} .warnc{color:var(--warn)}
 </style>
@@ -207,6 +210,52 @@
       Jog into free travel first to see the unloaded baseline, then approach a
       limit slowly and watch where it falls. Pick a threshold comfortably below
       the free-running value and above the noise floor.
+    </div>
+  </div>
+
+  <div class="panel" style="margin-top:16px">
+    <h2>Spatial controller — Gaussian spot</h2>
+    <div class="spotwrap">
+      <canvas id="spotcv" width="340" height="340"></canvas>
+      <div>
+        <label>σ width (mm) — <span id="siglab" class="v">20</span></label>
+        <input type="range" id="sigma" min="10" max="40" step="0.5" value="20">
+        <label>Total flux — <span id="amplab" class="v">0.010</span></label>
+        <input type="range" id="amp" min="0" max="0.25" step="0.001" value="0.010">
+        <label>Colour</label>
+        <input type="color" id="spotcol" value="#ffffff">
+        <div class="row"><span class="k">centre</span><span class="v" id="spotxy">—</span></div>
+        <div class="row"><span class="k">emitted flux</span><span class="v" id="spotflux">—</span></div>
+        <div class="row"><span class="k">max flux at this σ</span><span class="v" id="spothead">—</span></div>
+        <div class="row"><span class="k">clipping</span><span id="spotclip" class="pill s5">—</span></div>
+        <div class="jogs" style="margin-top:12px;margin-bottom:0">
+          <button onclick="spotCentre()">Centre</button>
+          <button onclick="ledOff()">Clear</button>
+        </div>
+      </div>
+    </div>
+    <div class="note">
+      Click or drag on the ring to place the spot. Dots are drawn at each pixel's
+      real computed position and coloured from
+      <span class="v">/led_ring/state</span> — so this is the hardware's readback
+      at the model's coordinates, not a local simulation. If the lit arc appears
+      mirrored about the vertical axis, the <span class="v">ring_clockwise</span>
+      parameter is wrong for how the strands were routed.
+      <br><br>
+      Index 0 of every ring points <strong>down</strong>. The dashed circle is
+      1σ.
+      <br><br>
+      Flux is <em>total</em>, not peak: narrowing σ concentrates the same light
+      rather than also dimming, so width and exposure stay independent. They are
+      not independently unbounded though — concentrating a large flux into few
+      pixels saturates them, and past that the requested total cannot be met.
+      "max flux at this σ" is where that starts.
+      <br><br>
+      σ is floored at ~10&nbsp;mm, which is half the 20.4&nbsp;mm inner-ring
+      pixel pitch. Below that the spot's apparent <em>width</em> swings by over
+      100% as it moves — collapsing onto one pixel at some angles and straddling
+      two at others. That is worse than dimming would be, because nothing about
+      the brightness reveals it.
     </div>
   </div>
 </div>
@@ -403,6 +452,18 @@ async function poll(){
              lit + ' px — ' + (match ? 'matches' : 'differs'));
       }
     }
+    lastLed = L || null;
+    if (L && L.spot) {
+      const m = L.spot_meta || {};
+      elSpotFlux.textContent = (m.achieved !== undefined) ? m.achieved.toFixed(4) : '—';
+      elSpotHead.textContent = (m.headroom !== undefined) ? m.headroom.toFixed(4) : '—';
+      pill(elSpotClip, m.clipped ? 's0' : 's1',
+           m.clipped ? m.clipped + ' px saturated' : 'none');
+    } else {
+      elSpotFlux.textContent = '—'; elSpotHead.textContent = '—';
+      pill(elSpotClip, 's5', 'no spot');
+    }
+    spotDraw();
     tail = s.tail || [];
     draw();
   } catch(e){
@@ -505,6 +566,123 @@ function ledAt(i){
                     ps: elLedPs.value});
 }
 function ledStep(d){ ledAt(ledIndex + d); }
+
+// ---- spatial controller -------------------------------------------------
+const elSpotCv   = document.getElementById('spotcv');
+const elSigma    = document.getElementById('sigma');
+const elSigLab   = document.getElementById('siglab');
+const elAmp      = document.getElementById('amp');
+const elAmpLab   = document.getElementById('amplab');
+const elSpotCol  = document.getElementById('spotcol');
+const elSpotXY   = document.getElementById('spotxy');
+const elSpotFlux = document.getElementById('spotflux');
+const elSpotHead = document.getElementById('spothead');
+const elSpotClip = document.getElementById('spotclip');
+
+const SPOT_R = 105;              // mm half-extent drawn on the canvas
+let spotGeom = null;             // fetched once from /api/led/geometry
+let lastLed  = null;             // most recent led block from poll()
+let spotX = null, spotY = null;
+let spotPending = 0;
+
+function spotToPx(x, y){
+  const S = elSpotCv.width;
+  return [ (x / SPOT_R) * (S / 2) + S / 2, S / 2 - (y / SPOT_R) * (S / 2) ];
+}
+function spotFromPx(px, py){
+  const S = elSpotCv.width;
+  return [ (px - S / 2) / (S / 2) * SPOT_R, -(py - S / 2) / (S / 2) * SPOT_R ];
+}
+
+function spotDraw(){
+  const g = elSpotCv.getContext('2d'), S = elSpotCv.width;
+  g.clearRect(0, 0, S, S);
+  g.fillStyle = '#0f1218'; g.fillRect(0, 0, S, S);
+  if (!spotGeom) return;
+
+  g.strokeStyle = '#242b36'; g.lineWidth = 1;
+  spotGeom.rings.forEach(r => {
+    g.beginPath(); g.arc(S/2, S/2, (r.radius / SPOT_R) * (S/2), 0, 6.2832); g.stroke();
+  });
+
+  const shown = lastLed && lastLed.shown;
+  spotGeom.positions.forEach((p, i) => {
+    const [px, py] = spotToPx(p[0], p[1]);
+    const c = (shown && shown[i] !== undefined) ? shown[i] : 0;
+    g.beginPath(); g.arc(px, py, 4.2, 0, 6.2832);
+    g.fillStyle = c ? `rgb(${(c>>16)&255},${(c>>8)&255},${c&255})` : '#191e27';
+    g.fill();
+    g.strokeStyle = '#2c3340'; g.stroke();
+  });
+
+  if (spotX !== null){
+    const [px, py] = spotToPx(spotX, spotY);
+    const rad = (Number(elSigma.value) / SPOT_R) * (S/2);
+    g.strokeStyle = '#5aa9ff'; g.lineWidth = 1.5;
+    g.setLineDash([4, 3]); g.beginPath(); g.arc(px, py, rad, 0, 6.2832); g.stroke();
+    g.setLineDash([]);
+    g.beginPath();
+    g.moveTo(px - 7, py); g.lineTo(px + 7, py);
+    g.moveTo(px, py - 7); g.lineTo(px, py + 7);
+    g.stroke();
+  }
+
+  g.fillStyle = '#8b94a6'; g.font = '11px system-ui';
+  g.fillText('index 0 — down', S/2 - 36, S - 7);
+}
+
+async function spotSend(){
+  if (spotX === null) return;
+  // Coalesce drags: one request in flight at a time, the newest wins.
+  if (spotPending) { spotPending = 2; return; }
+  spotPending = 1;
+  try {
+    while (spotPending) {
+      const r = await post('/api/spot', {
+        x: spotX, y: spotY,
+        sigma: Number(elSigma.value),
+        amplitude: Number(elAmp.value),
+        color: elSpotCol.value,
+      });
+      if (r && r.ok === false) elEvent.textContent = r.message;
+      spotPending = (spotPending === 2) ? 1 : 0;
+    }
+  } finally { spotPending = 0; }
+}
+
+function spotAt(ev){
+  const b = elSpotCv.getBoundingClientRect();
+  const px = (ev.clientX - b.left) * (elSpotCv.width  / b.width);
+  const py = (ev.clientY - b.top)  * (elSpotCv.height / b.height);
+  [spotX, spotY] = spotFromPx(px, py);
+  elSpotXY.textContent = `${spotX.toFixed(0)}, ${spotY.toFixed(0)} mm`;
+  spotDraw(); spotSend();
+}
+function spotCentre(){ spotX = 0; spotY = 0; spotAtCommit(); }
+function spotAtCommit(){
+  elSpotXY.textContent = `${spotX.toFixed(0)}, ${spotY.toFixed(0)} mm`;
+  spotDraw(); spotSend();
+}
+
+elSpotCv.addEventListener('pointerdown', e => {
+  elSpotCv.setPointerCapture(e.pointerId); spotAt(e);
+});
+elSpotCv.addEventListener('pointermove', e => { if (e.buttons) spotAt(e); });
+elSigma.addEventListener('input', () => {
+  elSigLab.textContent = elSigma.value; spotDraw(); spotSend();
+});
+elAmp.addEventListener('input', () => {
+  elAmpLab.textContent = Number(elAmp.value).toFixed(3); spotSend();
+});
+elSpotCol.addEventListener('input', spotSend);
+
+fetch('/api/led/geometry').then(r => r.json()).then(gm => {
+  spotGeom = gm;
+  elSigma.min = gm.sigma_min; elSigma.max = gm.sigma_max;
+  if (Number(elSigma.value) < gm.sigma_min) elSigma.value = gm.sigma_min;
+  elSigLab.textContent = elSigma.value;
+  spotDraw();
+}).catch(e => console.error('geometry fetch failed:', e));
 
 poll(); setInterval(poll, 200);
 addEventListener('resize', draw);

@@ -291,101 +291,96 @@ if (current_mode == PS_CAPTURING) {
 }
 ```
 
-### 4.2 Joystick → Illumination Direction
+### 4.2 Spatial LED Control (host-side)
 
-#### Polar Coordinate Table
+**Superseded.** This section previously described an on-board 2D Gaussian in
+(Δθ, Δr) driven by a joystick wired to the Feather. Three things about that were
+wrong or have since changed, and the code no longer matches it.
 
-Each LED is assigned a physical angle and a radius (normalized to the outer ring) at init time. Using real physical radii rather than equal fractions ensures that joystick magnitude maps to a physically meaningful illumination radius.
+**The MCU does no spatial computation.** `led.cpp` is a dumb indexed renderer:
+it receives 72 packed colours over `/led_ring/command` and displays them. The
+polar lookup table and `render_ring_gaussian()` have been removed. Geometry and
+the spot model live on the Pi, in `inspection_eoat/ring_spot.py`, so there is
+exactly one definition of where each pixel is.
 
-```c
-typedef struct {
-    float    angle_rad;     // [0, 2π), evenly spaced within each ring
-    float    radius_norm;   // physical radius / 92mm
-    uint16_t chain_index;   // index into pixel_buf[]
-} LedPolar;
+**Index 0 of every ring points DOWN**, not at 0 rad / 3 o'clock as the old
+`build_led_table()` comment assumed. In the viewing frame (x right, y up, angle
+CCW from +x) that is −π/2.
 
-static LedPolar led_table[NUM_RING_PIXELS];
+**The Gaussian is Cartesian, not separable in (θ, r).** A polar-separable
+Gaussian with σ fixed in radians has physical arc width `r·σ`, so the same
+parameters paint a 27 mm spot on the inner ring and a 48 mm one on the outer —
+width entangled with radial position, which is precisely what a low-dimensional
+action space must avoid. The model is now
 
-void build_led_table(void) {
-    // Physical assumption: pixel 0 of each ring is aligned at 0 radians (3 o'clock
-    // in standard math convention, or whichever direction the rig defines as 0°).
-    // All three rings share this alignment. If a ring is ever remounted at a different
-    // physical rotation, add a per-ring angle_offset_rad term here rather than
-    // touching the Gaussian mapping code.
-    //
-    // {LED count, physical radius normalized to outer ring (92mm)}
-    //   inner: 52/92 = 0.5652
-    //   mid:   72/92 = 0.7826
-    //   outer: 92/92 = 1.0000
-    const struct { int n; float r; } rings[3] = {
-        { NUM_RING_INNER, RADIUS_INNER },   // 16 LEDs
-        { NUM_RING_MID,   RADIUS_MID   },   // 24 LEDs
-        { NUM_RING_OUTER, RADIUS_OUTER }    // 32 LEDs
-    };
-    int offsets[3] = { OFFSET_INNER, OFFSET_MID, OFFSET_OUTER };
-    for (int ring = 0; ring < 3; ring++) {
-        for (int i = 0; i < rings[ring].n; i++) {
-            int idx = offsets[ring] + i;
-            led_table[offsets[ring] - OFFSET_INNER + i] = (LedPolar){
-                .angle_rad   = (2.0f * M_PI * i) / rings[ring].n,
-                .radius_norm = rings[ring].r,
-                .chain_index = idx
-            };
-        }
-    }
-}
-```
+    w_i = A · exp(−‖p_i − c‖² / 2σ²) / Σ_j exp(−‖p_j − c‖² / 2σ²)
 
-`build_led_table()` is called once during initialization; the table is read-only thereafter.
+with positions and σ in millimetres.
 
-#### ADC Sampling and 2D Gaussian Mapping
+The array supports this well because it is near-uniformly sampled in the plane:
 
-**ADC sampling:** 1kHz in `loop1()`. Joystick deflection maps directly to polar illumination coordinates: angle controls azimuth, magnitude controls which ring(s) are lit via a 2D Gaussian in (Δθ, Δr) space.
+| Ring | radius | count | arc pitch |
+|---|---|---|---|
+| inner | 52 mm | 16 | 20.4 mm |
+| mid | 72 mm | 24 | 18.8 mm |
+| outer | 92 mm | 32 | 18.1 mm |
 
-```cpp
-int adc_x = analogRead(A0);   // GP26
-int adc_y = analogRead(A1);   // GP27
+with 20 mm between rings radially. One isotropic σ in mm therefore fits both
+axes, where two σ in incompatible units (radians and normalised radius) did not.
 
-float dx  = (adc_x - 2048.0f) / 2048.0f;  // [-1, 1]
-float dy  = (adc_y - 2048.0f) / 2048.0f;
-float mag = sqrtf(dx*dx + dy*dy);          // [0, 1], maps to radius_norm
+#### Amplitude is total flux
 
-if (mag > JOYSTICK_DEADZONE && current_mode != PS_CAPTURING
-                             && current_mode != HOMING) {
-    float angle = atan2f(dy, dx);           // [-π, π]
-    set_ring_2d_gaussian(angle, mag);
-    joystick_active = true;
-} else {
-    joystick_active = false;
-    // Ring reverts to last /led_ring/command state
-}
-```
+`A` is the **total** emitted flux in [0, 1], where 1.0 is every pixel at full
+scale — not the peak. With a peak-normalised Gaussian, widening the spot
+silently raises total light as ~σ², so a compensation controller adjusting width
+would be chasing an exposure change it never requested. Normalising the weights
+to sum to `A` decouples them: narrowing σ concentrates the same light.
 
-```cpp
-void set_ring_2d_gaussian(float joystick_angle, float joystick_magnitude) {
-    for (int i = 0; i < NUM_RING_PIXELS; i++) {
-        // Angular distance, wrapped to [-π, π]
-        float dtheta = joystick_angle - led_table[i].angle_rad;
-        dtheta = atan2f(sinf(dtheta), cosf(dtheta));
+The two are not independently unbounded. Concentrating a large flux into few
+pixels saturates them, after which the requested total cannot be met;
+`render_spot()` returns `headroom` (the largest `A` this σ can carry) and
+`achieved` (what was actually emitted) so a caller can respect the limit rather
+than silently under-deliver.
 
-        // Radial distance in normalized radius space
-        float dr = joystick_magnitude - led_table[i].radius_norm;
+#### σ is floored by the pixel pitch
 
-        float weight = expf(-(dtheta * dtheta) / (2.0f * SIGMA_A * SIGMA_A)
-                            -(dr    * dr)       / (2.0f * SIGMA_R * SIGMA_R));
+Not a taste setting. Total output does *not* ripple as the spot slides — the
+flux normalisation forces the sum to the requested value, cancelling exactly
+that artifact. What degrades is the spot's **shape**. Sweeping a spot around the
+outer ring and taking the second moment of the emitted light:
 
-        uint8_t v = (uint8_t)(weight * 255.0f);
-        strip.setPixelColor(led_table[i].chain_index, v, v, v);
-    }
-    pixels_dirty = true;
-}
-```
+| σ (mm) | σ/pitch | centroid error | apparent width swing |
+|---|---|---|---|
+| 15.0 | 0.73 | 0.46° | 7.4% |
+| 10.2 | 0.50 | 0.26° | 7.5% |
+| 8.0 | 0.39 | 0.64° | 26% |
+| 6.0 | 0.29 | 1.79° | 108% |
+| 4.0 | 0.20 | 3.40° | 200% |
 
-`SIGMA_A` controls angular spread (suggested starting value: `M_PI / 6`, i.e. ±30° at half-power). `SIGMA_R` controls radial spread across rings (suggested starting value: `0.15`, tight enough to primarily illuminate one ring at a time given the normalized radii are spaced ~0.22 apart).
+The centroid interpolates well, but below σ/pitch ≈ 0.5 the apparent width
+breathes wildly — collapsing onto one pixel at some angles, straddling two at
+others. That is a worse failure than dimming, because no brightness cue reveals
+it. Hence `SIGMA_MIN_MM ≈ 10.2 mm` (half the coarsest, inner-ring pitch).
 
-At full deflection (`mag = 1.0`) the highlight sits on the outer ring. At `mag ≈ 0.78` it centres on the middle ring. At `mag ≈ 0.57` it centres on the inner ring. Intermediate magnitudes smoothly blend across adjacent rings.
+#### Scope and status
 
-The joystick does **not** publish to `/led_ring/state` — its control is purely local. The state topic always reflects what is physically on the ring.
+This parameterisation is for **shadow / over-exposure compensation**, not for
+photometric stereo. PS wants discrete, well-separated light directions, which is
+a different problem this deliberately does not serve.
+
+The joystick is **deferred**, and when it lands it is expected to connect to the
+Pi rather than the Feather, since what it drives is now host-side. `GP28/GP29`
+on the Feather should be considered available.
+
+A driving UI exists in the lens tuner (`/api/spot`, `/api/led/geometry`). Its
+canvas draws the live `/led_ring/state` readback at the model's computed
+coordinates, so it is a verification instrument rather than a simulation — a
+wrong `ring_clockwise` shows up as a pattern mirrored about the vertical axis.
+That winding direction is the one piece of geometry that cannot be derived; it
+depends on how the strands were physically routed.
+
+`/led_ring/state` reflects what is physically on the ring, including patterns no
+`/led_ring/command` asked for (a homing blank, a capture pattern).
 
 ### 4.3 Stepper / TMC2209
 
@@ -1001,8 +996,8 @@ Leaves ~180KB headroom. Profile with `xPortGetFreeHeapSize()` after bringing all
 | `NUM_RING_INNER/MID/OUTER` | 16 / 24 / 32 | Fixed — matches physical rings |
 | `RADIUS_INNER/MID/OUTER` | 0.5652 / 0.7826 / 1.0 | Fixed — 52/72/92mm ÷ 92mm |
 | `RING_SETTLE_MS` | 5 | Time after pixel write before FSTROBE |
-| `SIGMA_A` | `M_PI / 6` | Angular spread of joystick highlight (~±30° half-power) |
-| `SIGMA_R` | 0.15 | Radial spread across rings (rings spaced ~0.22 apart) |
+| ~~`SIGMA_A`~~ | — | Removed; the spot model is host-side and Cartesian. See §4.2 |
+| ~~`SIGMA_R`~~ | — | Removed; superseded by a single σ in mm (`ring_spot.SIGMA_MIN_MM`) |
 | `MAG_STEP` | 0.05 | Normalized position increment per button press |
 | `HOMING_VELOCITY` | 200 steps/s | Slow enough for reliable StallGuard |
 | `LENS_DEFAULT_VELOCITY` | 500 steps/s | For position-mode commands |

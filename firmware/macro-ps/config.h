@@ -184,9 +184,9 @@
 #define OFFSET_INNER             (NUM_NEOKEYS)
 #define OFFSET_MID               (OFFSET_INNER + NUM_RING_INNER)
 #define OFFSET_OUTER             (OFFSET_MID + NUM_RING_MID)
-#define RADIUS_INNER             0.5652f
-#define RADIUS_MID               0.7826f
-#define RADIUS_OUTER             1.0f
+// Ring radii and the Gaussian's sigmas used to live here. They are host-side
+// now: inspection_eoat/ring_spot.py owns the geometry in millimetres (52/72/92)
+// and the spot model, and this board just renders the indexed frame it is sent.
 
 // Locally-generated NeoKey colours (ROS-commanded colours arrive via
 // state.neokey_colors[] and are used where nothing local overrides them).
@@ -343,15 +343,15 @@
 // =============================================================================
 // Joystick (stub — pin defines only)
 // =============================================================================
-// A0/A1 (GP26/GP27) are the stepper's DIR/STEP on this board, so the joystick
-// moves to the other two ADC channels. Nothing reads these yet — the axes are
-// unwired, so confirm the mapping against the harness before joystick.cpp
-// lands rather than assuming it carried over.
+// DEFERRED, and probably for good: the joystick is expected to connect to the
+// Pi rather than the Feather, since the thing it drives — the spatial LED
+// controller — now lives host-side. These pins are reserved rather than
+// committed, and GP28/GP29 should be considered available if something else
+// needs an ADC channel. SIGMA_A/SIGMA_R went with the Gaussian; see
+// inspection_eoat/ring_spot.py.
 #define JOYSTICK_X_PIN           A2    // GP28 on the Feather
 #define JOYSTICK_Y_PIN           A3    // GP29 on the Feather
 #define JOYSTICK_DEADZONE        0.05f
-#define SIGMA_A                  0.5236f   // ~M_PI/6
-#define SIGMA_R                  0.15f
 
 // =============================================================================
 // NeoKey switches (stub — pin defines only)
