@@ -89,8 +89,24 @@ struct SystemState {
 
   // LED state mirrored from /led_ring/command (canonical source from ROS).
   // Adafruit_NeoPixel's internal buffer is the realisation.
+  // Sized by the WIRE capacity, not the physical NeoKey count: NUM_NEOKEYS is 0
+  // while the keys are unwired, and a zero-length array is a GCC extension
+  // rather than valid C++. Holding the commanded values regardless also keeps
+  // the array meaningful the moment the keys are fitted.
   uint32_t ring_colors[NUM_RING_PIXELS];
-  uint32_t neokey_colors[NUM_NEOKEYS];
+  uint32_t neokey_colors[LED_NEOKEY_WIRE_MAX];
+
+  // What the renderer last pushed to the strand, which is NOT always what was
+  // commanded above: a joystick override, a homing blank, or a capture pattern
+  // each pre-empt the commanded frame. led_tick() on core 1 writes these after
+  // it renders; core 0 publishes them as /led_ring/state, so the host can tell
+  // "the ring is showing my pattern" from "something local took the ring".
+  //
+  // Written only on the ticks where the frame actually changed, which is the
+  // same condition that gates strip.show() — there is no point paying for the
+  // copy to restate an unchanged frame.
+  uint32_t shown_ring_colors[NUM_RING_PIXELS];
+  uint32_t shown_neokey_colors[LED_NEOKEY_WIRE_MAX];
 
   // Last-command timestamps for watchdogs
   uint64_t last_vel_cmd_us;

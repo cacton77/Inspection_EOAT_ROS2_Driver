@@ -102,16 +102,23 @@ static void render_ring_blank() {
 // Opposing brightness ramps for the magnifier keys (README §4.5).
 // p = 1.0 -> Mag+ full, Mag- off. p = 0.5 -> both half.
 static void render_neokey_lens_position(float p) {
+#if NUM_NEOKEYS >= 3
   if (p < 0.0f) p = 0.0f;
   if (p > 1.0f) p = 1.0f;
   const uint8_t v_plus  = (uint8_t)(p * 255.0f);
   const uint8_t v_minus = (uint8_t)((1.0f - p) * 255.0f);
   frame[IDX_NEOKEY_MAG_PLUS]  = rgb(0, v_plus,  0);
   frame[IDX_NEOKEY_MAG_MINUS] = rgb(0, v_minus, 0);
+#else
+  // NeoKeys are not on the strand (config.h NUM_NEOKEYS). frame[] is sized to
+  // what is physically there, so these indices do not exist.
+  (void)p;
+#endif
 }
 
 // Amber blink per homing phase (README §4.4).
 static void render_neokey_homing(HomingPhase phase, bool blink_on) {
+#if NUM_NEOKEYS >= 3
   frame[IDX_NEOKEY_PS] = NEOKEY_COLOR_OFF;
   switch (phase) {
     case HOMING_SEEKING_MAX:
@@ -132,6 +139,9 @@ static void render_neokey_homing(HomingPhase phase, bool blink_on) {
       frame[IDX_NEOKEY_MAG_MINUS] = NEOKEY_COLOR_OFF;
       break;
   }
+#else
+  (void)phase; (void)blink_on;
+#endif
 }
 
 // -----------------------------------------------------------------------------
@@ -144,7 +154,10 @@ bool led_init() {
   if (strip.getPixels() == nullptr) {
     return false;   // buffer allocation failed
   }
-  strip.setBrightness(255);
+  // Power budget, not taste — see LED_RING_MAX_BRIGHTNESS in config.h. An
+  // all-white frame across NUM_PIXELS_TOTAL would be ~4.5 A at 5 V unclamped,
+  // and a single malformed /led_ring/command can ask for exactly that.
+  strip.setBrightness(LED_RING_MAX_BRIGHTNESS);
   strip.clear();
   strip.show();
 
@@ -165,7 +178,7 @@ void led_tick() {
   // Snapshot everything the render needs in one short critical section — the
   // rendering itself (and show()) must not hold the mutex against core 0.
   static uint32_t ring_colors[NUM_RING_PIXELS];
-  static uint32_t neokey_colors[NUM_NEOKEYS];
+  static uint32_t neokey_colors[LED_NEOKEY_WIRE_MAX];
 
   mutex_enter_blocking(&state_mutex);
   const SystemMode  mode     = state.mode;
@@ -182,7 +195,9 @@ void led_tick() {
       // The action server owns the ring for the duration of the capture; it
       // writes patterns into state.ring_colors[] and we just realise them.
       render_ring_from_command(ring_colors);
+#if NUM_NEOKEYS >= 3
       frame[IDX_NEOKEY_PS] = NEOKEY_COLOR_PS_ACTIVE;   // solid while capturing
+#endif
       render_neokey_lens_position(position);
       break;
 
@@ -207,7 +222,9 @@ void led_tick() {
       }
       // Nothing local drives the PS key outside a capture, so it follows
       // whatever /led_ring/command last asked for.
+#if NUM_NEOKEYS >= 3
       frame[IDX_NEOKEY_PS] = neokey_colors[IDX_NEOKEY_PS];
+#endif
       render_neokey_lens_position(position);
       break;
   }
@@ -222,5 +239,22 @@ void led_tick() {
   }
   if (dirty) {
     strip.show();
+
+    // Publish-side mirror of what actually went out, for /led_ring/state. Taken
+    // after show() and in its own short critical section: the rule at the top of
+    // this function is that neither rendering nor show() may hold state_mutex
+    // against core 0's executor.
+    //
+    // Indexed in ring order (inner, mid, outer) rather than chain order, to
+    // match LedRingCommand.colors — led_table carries that mapping, so go
+    // through it rather than assuming the two differ by a constant offset.
+    mutex_enter_blocking(&state_mutex);
+    for (int i = 0; i < NUM_RING_PIXELS; i++) {
+      state.shown_ring_colors[i] = frame[led_table[i].chain_index];
+    }
+    for (int i = 0; i < NUM_NEOKEYS; i++) {
+      state.shown_neokey_colors[i] = frame[i];
+    }
+    mutex_exit(&state_mutex);
   }
 }

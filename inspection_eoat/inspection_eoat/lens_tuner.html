@@ -37,6 +37,10 @@
   canvas{width:100%;height:280px;display:block;background:#0f1218;border-radius:8px;border:1px solid var(--line)}
   .legend{display:flex;gap:16px;color:var(--dim);font-size:12px;margin-top:8px;flex-wrap:wrap}
   .sw{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:6px;vertical-align:middle}
+  .ledrings{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin:4px 0 10px}
+  .ledwalk{display:grid;grid-template-columns:auto 1fr auto;gap:8px;margin:4px 0 10px}
+  input[type=color]{width:100%;height:34px;background:#0f1218;border:1px solid var(--line);
+         border-radius:6px;padding:2px;cursor:pointer}
   .note{color:var(--dim);font-size:12px;margin-top:10px}
   .bad{color:var(--bad)} .ok{color:var(--ok)} .warnc{color:var(--warn)}
 </style>
@@ -130,6 +134,63 @@
       </div>
       <label style="margin-bottom:0"><input type="checkbox" id="rec" checked
         onchange="post('/api/record',{on:this.checked})"> recording</label>
+    </div>
+
+    <div class="panel" style="margin-top:16px">
+      <h2>LED ring</h2>
+      <button class="stop" onclick="ledOff()">ALL OFF</button>
+
+      <label>Solid — all 72 pixels at once</label>
+      <div class="jogs" style="margin-bottom:0">
+        <input type="color" id="ledsolid" value="#ffffff">
+        <button onclick="ledSolid()">Apply solid</button>
+      </div>
+
+      <label>Per ring — inner / mid / outer</label>
+      <div class="ledrings">
+        <input type="color" id="ledinner" value="#ff4040">
+        <input type="color" id="ledmid"   value="#40ff40">
+        <input type="color" id="ledouter" value="#4080ff">
+      </div>
+      <button style="width:100%" onclick="ledRings()">Apply rings</button>
+
+      <label>Single pixel — step through the chain</label>
+      <div class="ledwalk">
+        <button onclick="ledStep(-1)">◀</button>
+        <input type="number" id="ledidx" value="0" min="0" max="71"
+               onchange="ledAt(Number(this.value))">
+        <button onclick="ledStep(1)">▶</button>
+      </div>
+      <div class="jogs">
+        <input type="color" id="ledpix" value="#ffffff">
+        <input type="color" id="ledps"  value="#000000" title="NeoKey PS key">
+      </div>
+
+      <div class="row"><span class="k">strand</span><span class="v" id="ledn">—</span></div>
+      <div class="row"><span class="k">commanded</span><span class="v" id="ledcmd">—</span></div>
+      <div class="row"><span class="k">on strand</span><span id="ledshown" class="pill s5">—</span></div>
+
+      <div class="note">
+        The two right-hand swatches are the single-pixel colour and the NeoKey PS
+        key. Mag+/Mag− are not settable here — the firmware drives them from lens
+        position, so anything sent for them is ignored.
+        <br><br>
+        Per-ring and single-pixel are bring-up instruments: they check that the
+        inner/mid/outer boundaries and the chain order in
+        <span class="v">led.cpp</span> match the hardware. That mapping assumes
+        pixel&nbsp;0 of every ring is physically at 0&nbsp;radians, which has
+        never been verified against the real rings.
+        <br><br>
+        "on strand" is read back from <span class="v">/led_ring/state</span>, so
+        it is what the MCU says it actually rendered. It legitimately
+        <em>differs</em> from the command while homing blanks the ring or a
+        capture owns it — that is information, not a fault.
+        <br><br>
+        Brightness is clamped in firmware by
+        <span class="v">LED_RING_MAX_BRIGHTNESS</span>: all 75&nbsp;pixels at
+        full white would be ~4.5&nbsp;A at 5&nbsp;V unclamped. Unlike a jog there
+        is no deadman here — a light is meant to stay on when this page closes.
+      </div>
     </div>
   </div>
 
@@ -320,6 +381,28 @@ async function poll(){
       pill(elPwr, st.driver_enabled ? 's2':'s5',
            st.driver_enabled ? 'coils energised' : 'coils idle');
     }
+    const L = s.led;
+    if (L) {
+      if (L.ring_pixels && L.ring_pixels !== ledCount) {
+        ledCount = L.ring_pixels;
+        elLedIdx.max = ledCount - 1;
+        if (ledIndex >= ledCount) ledAt(0);
+      }
+      elLedN.textContent = ledCount + ' px'
+        + (ledCount < 72 ? ' (bring-up — config.h drives fewer than 72)' : '');
+      elLedCmd.textContent = L.frame.filter(c => c).length + ' / ' + ledCount + ' px';
+      if (!L.shown || L.shown_stale) {
+        pill(elLedShown, 's0', 'no /led_ring/state');
+      } else {
+        const lit = L.shown.filter(c => c).length;
+        const match = L.shown.length === L.frame.length &&
+                      L.shown.every((c, i) => c === L.frame[i]);
+        // s2 (informational) rather than s3 when it differs: homing and captures
+        // are both supposed to take the ring away from the commanded frame.
+        pill(elLedShown, match ? 's1' : 's2',
+             lit + ' px — ' + (match ? 'matches' : 'differs'));
+      }
+    }
     tail = s.tail || [];
     draw();
   } catch(e){
@@ -385,6 +468,43 @@ function draw(){
   const last = tail[n-1][0].toFixed(1)+'s';
   g.fillText(last, pad.l+W-g.measureText(last).width, h-6);
 }
+
+// ---- LED ring ----------------------------------------------------------
+// Explicit lookups throughout, per the note above on id-as-global.
+const elLedCmd   = document.getElementById('ledcmd');
+const elLedShown = document.getElementById('ledshown');
+const elLedSolid = document.getElementById('ledsolid');
+const elLedInner = document.getElementById('ledinner');
+const elLedMid   = document.getElementById('ledmid');
+const elLedOuter = document.getElementById('ledouter');
+const elLedIdx   = document.getElementById('ledidx');
+const elLedPix   = document.getElementById('ledpix');
+const elLedPs    = document.getElementById('ledps');
+const elLedN     = document.getElementById('ledn');
+let ledIndex = 0;
+// Strand length as reported by /led_ring/state. The firmware is the authority --
+// it is cut down to a single pixel during bring-up -- so nothing here hardcodes
+// 72. Provisional until the first state message lands.
+let ledCount = 72;
+
+function ledOff(){ post('/api/led', {mode:'off'}); }
+function ledSolid(){
+  post('/api/led', {mode:'solid', color: elLedSolid.value, ps: elLedPs.value});
+}
+function ledRings(){
+  post('/api/led', {mode:'rings', inner: elLedInner.value, mid: elLedMid.value,
+                    outer: elLedOuter.value, ps: elLedPs.value});
+}
+// Wrap rather than clamp, so holding ▶ walks the chain in a loop instead of
+// parking silently at 71 and looking like the control stopped working.
+function ledAt(i){
+  const n = Math.max(1, ledCount);
+  ledIndex = ((Math.trunc(i) % n) + n) % n;
+  elLedIdx.value = ledIndex;
+  post('/api/led', {mode:'index', index: ledIndex, color: elLedPix.value,
+                    ps: elLedPs.value});
+}
+function ledStep(d){ ledAt(ledIndex + d); }
 
 poll(); setInterval(poll, 200);
 addEventListener('resize', draw);

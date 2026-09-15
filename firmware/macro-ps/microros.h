@@ -33,4 +33,5 @@ void microros_destroy_entities();
 void microros_drain_and_publish();
 void microros_spin();
 void microros_publish_lens_state();
+void microros_publish_led_state();
 bool microros_ping(uint32_t timeout_ms);

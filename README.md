@@ -14,7 +14,7 @@ table is a wiring aid. If the two disagree, config.h is right.
 
 | Peripheral | Interface | Pins | Notes |
 |---|---|---|---|
-| NeoPixel chain (NeoKeys + 3× rings) | Bit-banged (Adafruit_NeoPixel) | GP24 (D24) | GP16 is the onboard NeoPixel — cannot use |
+| NeoPixel chain (NeoKeys + 3× rings) | PIO (Adafruit_NeoPixel) | GP7 (D5) | Moved off GP24, which the encoder now uses. GP16 is the onboard NeoPixel — cannot use. Driven at 3.3 V against a ~3.5 V WS2812 threshold: in spec only with a level shifter. **Currently cut down to 1 pixel for bring-up — see config.h chain composition** |
 | TMC2209 stepper driver | `Serial1` half-duplex + DIR/STEP/EN | GP0/GP1 + GP26/GP27/GP6 | See TMC2209 wiring below |
 | LSM6DSOX IMU | I2C1 via STEMMA QT (`Wire`) | GP2 (SDA), GP3 (SCL) | JST-SH cable direct to the STEMMA QT port, no additional wiring |
 | Joystick X | ADC2 | GP28 (A2) | 12-bit, center ~2048. Not yet wired |
@@ -22,6 +22,7 @@ table is a wiring aid. If the two disagree, config.h is right.
 | NeoKey 1 (Mag +) | GPIO | GP9 (D9) | Pull-up, active low. Not yet wired |
 | NeoKey 2 (Mag −) | GPIO | GP10 (D10) | Pull-up, active low. Not yet wired |
 | NeoKey 3 (PS trigger) | GPIO | GP11 (D11) | Pull-up, active low. Not yet wired |
+| Quadrature encoder (ME1K) | PIO | GP24 (A), GP25 (B), GP8 (Z) | Differential; needs an AM26LV32 receiver at 3.3 V — outputs measured 1.9 V at VCC=3.3 V and 3.8 V at VCC=5 V, i.e. below V_IH and above absolute max respectively. Not yet wired |
 | XVS camera sync input | GPIO interrupt | GP12 (D12) | 1.8V→3.3V level shifter required; Pi HQ Camera sync connector. Pin reserved, ISR not implemented |
 | micro-ROS transport | USB-CDC (`Serial`) | USB connector | Not a UART — this is why GP0/GP1 are free for the TMC2209 |
 

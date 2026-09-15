@@ -58,6 +58,7 @@ void loop() {
       microros_spin();
       microros_drain_and_publish();
       microros_publish_lens_state();
+      microros_publish_led_state();
       if (now_us - last_ping_us > MICROROS_PING_PERIOD_US) {
         last_ping_us = now_us;
         if (!microros_ping(MICROROS_PING_TIMEOUT_MS)) {

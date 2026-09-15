@@ -11,9 +11,16 @@
 // JOYSTICK_X/Y_PIN which are deliberately the A2/A3 aliases.
 //
 // Broken out on the Feather header and unassigned after everything below:
-// GP7 (D5), GP8 (D6), GP13 (D13, shared with the onboard red LED), GP18 (SCK),
-// GP19 (MO), GP20 (MI), GP25 (D25). The QT Py had none — this is what makes a
-// quadrature encoder (A/B/I) and the XVS input possible on this board.
+// GP8 (D6), GP13 (D13, shared with the onboard red LED), GP18 (SCK), GP19 (MO),
+// GP20 (MI). The QT Py had none — this is what makes a quadrature encoder
+// (A/B/I) and the XVS input possible on this board.
+//
+// GP7 was held for the encoder's A channel, but the NeoPixel chain is
+// physically wired there, so the chain moved off GP24 and the encoder moved
+// onto GP24/GP25 (see the encoder block at the end of this file). Both
+// assignments still satisfy the PIO decoder's one real constraint — A and B on
+// consecutive GPIOs — and this ordering additionally leaves SPI (GP18/19/20)
+// whole, which the GP7/GP8 plan did not.
 //
 // Not brought out at all: GP14, GP15, GP17, GP21, GP22, GP23. GP16 is the
 // onboard NeoPixel. Do not assign any of them.
@@ -113,20 +120,73 @@
 // =============================================================================
 // LED ring + NeoKeys (external NeoPixel chain — separate from the status LED)
 // =============================================================================
-#define NEOPIXEL_DATA_PIN        24    // GP24 (D24) — same GPIO as on the QT Py
+// GP7 (D5), not the QT Py's GP24: this is where the chain is actually wired.
+// Nothing else may claim GP7 — Adafruit_NeoPixel drives WS2812 timing from a
+// PIO state machine, so a second owner would not merely share the pin, it
+// would fail to acquire a state machine at all and die at led_init().
+#define NEOPIXEL_DATA_PIN        7     // GP7 (D5)
 #define LED_TICK_HZ              50    // render/compare rate; show() only on change
-#define NUM_NEOKEYS              3
-#define NUM_RING_INNER           16
-#define NUM_RING_MID             24
-#define NUM_RING_OUTER           32
+// Uniform scale applied by Adafruit_NeoPixel at show() time, and a power budget
+// rather than an aesthetic choice. At the full 75-pixel chain a WS2812 draws
+// ~60 mA at full white, so an all-white frame is ~4.5 A at 5 V — which a host
+// bug can ask for in one message. At 128 that worst case is ~2.2 A. (Moot at
+// the bring-up counts below, which is the point of them.)
+//
+// Real photometric-stereo patterns light a fraction of the ring at a time, so
+// this mostly bounds the pathological frame rather than the working one. Raise
+// it only against a measured supply rating, and note that it scales everything:
+// host-side colour values are relative to this, not absolute radiometric units.
+#define LED_RING_MAX_BRIGHTNESS  128
+
+// -----------------------------------------------------------------------------
+// Chain composition
+// -----------------------------------------------------------------------------
+// *** BRING-UP VALUES — driving one pixel, not 72. ***
+// Production values are NUM_NEOKEYS 3, inner/mid/outer 16/24/32. Restoring them
+// is a change to these four numbers and nothing else: every offset and total
+// below is derived, and the wire capacities are deliberately NOT (see the block
+// after this one).
+//
+// NUM_NEOKEYS is 0 because the NeoKeys genuinely are not on the strand yet — the
+// stub block near the end of this file has said so all along. That matters more
+// than it looks: the chain map puts NeoKeys FIRST, so a non-zero count here
+// shifts every ring pixel down the strand by that many positions. With the keys
+// unwired and this left at 3, ring pixel 0 would have been written to physical
+// pixel 3 and the last three ring pixels would have fallen off the end of the
+// strand entirely.
+//
+// A WS2812 strand ignores data past its own length — each pixel takes the first
+// 24 bits and passes the rest along — so driving fewer pixels than are
+// physically present is safe. The other 71 simply receive nothing and stay dark.
+#define NUM_NEOKEYS              0     // production: 3 — not wired yet
+#define NUM_RING_INNER           1     // production: 16
+#define NUM_RING_MID             0     // production: 24
+#define NUM_RING_OUTER           0     // production: 32
 #define NUM_RING_PIXELS          (NUM_RING_INNER + NUM_RING_MID + NUM_RING_OUTER)
 #define NUM_PIXELS_TOTAL         (NUM_NEOKEYS + NUM_RING_PIXELS)
+
+// Wire capacities for LedRingCommand/LedRingState. These track the BOUNDS in the
+// .msg files and must never be derived from the counts above.
+//
+// microcdr is handed the sequence capacity and rejects a message whose declared
+// length exceeds it -- the WHOLE message, not the overflowing field. So if this
+// followed NUM_RING_PIXELS down to 1, a host publishing a normal 72-entry frame
+// would have every LedRingCommand discarded during deserialisation and nothing
+// would light at all, with no error anywhere to say why. cb_led_cmd() clamps to
+// the physical count after a successful decode; that is where truncation
+// belongs, not here.
+#define LED_RING_WIRE_MAX        72    // == LedRingCommand.colors bound
+#define LED_NEOKEY_WIRE_MAX      3     // == LedRingCommand.neokey_colors bound
+
 #define IDX_NEOKEY_PS            0
 #define IDX_NEOKEY_MAG_PLUS      1
 #define IDX_NEOKEY_MAG_MINUS     2
-#define OFFSET_INNER             3
-#define OFFSET_MID               19
-#define OFFSET_OUTER             43
+// Derived, not written out: the ring sits immediately after the NeoKeys, and
+// each ring after the previous one. These used to be the literals 3/19/43, which
+// silently encoded NUM_NEOKEYS == 3 in three more places.
+#define OFFSET_INNER             (NUM_NEOKEYS)
+#define OFFSET_MID               (OFFSET_INNER + NUM_RING_INNER)
+#define OFFSET_OUTER             (OFFSET_MID + NUM_RING_MID)
 #define RADIUS_INNER             0.5652f
 #define RADIUS_MID               0.7826f
 #define RADIUS_OUTER             1.0f
@@ -327,5 +387,43 @@
 #define XVS_PIN                  12    // GP12 (D12)
 #define XVS_TIMEOUT_US           200000
 #define RING_SETTLE_MS           5
+
+// =============================================================================
+// Quadrature encoder (stub — pin defines only, nothing reads these yet)
+// =============================================================================
+// StepperOnline ME1K on the NEMA 11: magnetic incremental, 1000 PPR / 4000 CPR,
+// differential line-driver A/B/Z.
+//
+// A and B must be CONSECUTIVE GPIOs with A the lower of the pair: the PIO
+// quadrature program reads both phases with a single `in pins, 2` based at
+// ENC_A_PIN. That constraint, plus keeping SPI intact, is what picks GP24/GP25
+// — freed when the NeoPixel chain moved to GP7.
+//
+// Nothing may call Wire1.begin(): Wire1 is on GP24/GP25 on this variant. That
+// restriction predates the encoder (it used to protect the NeoPixel chain on
+// GP24) and now protects both encoder phases instead.
+//
+// The encoder CANNOT be wired straight to these pins. Its outputs sit ~1.2–1.4 V
+// below its own supply — measured 1.9 V at VCC=3.3 V and 3.8 V at VCC=5 V, so
+// the datasheet's "Output High Voltage: 5V" is simply wrong. The first is below
+// the RP2040's guaranteed V_IH (0.65 × IOVDD = 2.145 V); the second is above its
+// absolute maximum (IOVDD + 0.3 = 3.6 V). An AM26LV32 differential receiver
+// powered at 3.3 V goes between the two, which also uses the complement legs and
+// buys common-mode rejection on 500 mm of cable run beside StealthChop edges.
+#define ENC_A_PIN                24    // GP24 (D24) — EA via AM26LV32
+#define ENC_B_PIN                25    // GP25 (D25) — EB via AM26LV32
+#define ENC_Z_PIN                8     // GP8  (D6)  — EZ via AM26LV32
+// 1.8° at TMC_MICROSTEPS=16 is 3200 microsteps/rev against 4000 counts/rev, so
+// counts = steps * 5 / 4 exactly — integer, no accumulating float error.
+//
+// Compare CUMULATIVELY, never per-microstep. A magnetic encoder interpolates
+// its counts from a sine/cosine pair, and that interpolation error is tens of
+// counts — but it is bounded and periodic within a revolution rather than
+// accumulating, so a whole-move comparison is sound where a per-step one is
+// pure noise. Z fires once per motor revolution and so is ambiguous on its own;
+// it only becomes a datum once a limit switch establishes which revolution.
+#define ENC_CPR                  4000
+#define ENC_COUNTS_PER_STEP_NUM  5
+#define ENC_COUNTS_PER_STEP_DEN  4
 
 #endif  // CONFIG_H
