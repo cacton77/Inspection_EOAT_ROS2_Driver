@@ -129,8 +129,8 @@
 // Uniform scale applied by Adafruit_NeoPixel at show() time, and a power budget
 // rather than an aesthetic choice. At the full 75-pixel chain a WS2812 draws
 // ~60 mA at full white, so an all-white frame is ~4.5 A at 5 V — which a host
-// bug can ask for in one message. At 128 that worst case is ~2.2 A. (Moot at
-// the bring-up counts below, which is the point of them.)
+// bug can ask for in one message. At 128 that worst case is ~2.2 A, and with the
+// full ring now enabled below that ceiling is live rather than theoretical.
 //
 // Real photometric-stereo patterns light a fraction of the ring at a time, so
 // this mostly bounds the pathological frame rather than the working one. Raise
@@ -141,27 +141,24 @@
 // -----------------------------------------------------------------------------
 // Chain composition
 // -----------------------------------------------------------------------------
-// *** BRING-UP VALUES — driving one pixel, not 72. ***
-// Production values are NUM_NEOKEYS 3, inner/mid/outer 16/24/32. Restoring them
-// is a change to these four numbers and nothing else: every offset and total
-// below is derived, and the wire capacities are deliberately NOT (see the block
-// after this one).
+// The full 72-pixel ring. Verified at one pixel first (R/G/B/W in order, which
+// also confirmed the NEO_GRB channel order and that the 3.3 V data line drives
+// a WS2812 at all) before being opened up to the whole strand.
 //
-// NUM_NEOKEYS is 0 because the NeoKeys genuinely are not on the strand yet — the
-// stub block near the end of this file has said so all along. That matters more
-// than it looks: the chain map puts NeoKeys FIRST, so a non-zero count here
-// shifts every ring pixel down the strand by that many positions. With the keys
-// unwired and this left at 3, ring pixel 0 would have been written to physical
-// pixel 3 and the last three ring pixels would have fallen off the end of the
-// strand entirely.
+// NUM_NEOKEYS stays 0 — the keys are STILL not on the strand, and this is not
+// the place to pre-declare them. The chain map puts NeoKeys FIRST, so a non-zero
+// count here shifts every ring pixel down the strand by that many positions:
+// set this to 3 while they are unwired and ring pixel 0 lands on physical pixel
+// 3 while the last three ring pixels fall off the end of the strand entirely.
+// Raise it in the same change that physically fits the keys, not before.
 //
-// A WS2812 strand ignores data past its own length — each pixel takes the first
-// 24 bits and passes the rest along — so driving fewer pixels than are
-// physically present is safe. The other 71 simply receive nothing and stay dark.
-#define NUM_NEOKEYS              0     // production: 3 — not wired yet
-#define NUM_RING_INNER           1     // production: 16
-#define NUM_RING_MID             0     // production: 24
-#define NUM_RING_OUTER           0     // production: 32
+// Driving FEWER pixels than are physically present is always safe — a WS2812
+// takes the first 24 bits and passes the rest along — so cutting these counts
+// back down for a future bring-up costs nothing but a recompile.
+#define NUM_NEOKEYS              0     // 3 once the NeoKeys are physically fitted
+#define NUM_RING_INNER           16
+#define NUM_RING_MID             24
+#define NUM_RING_OUTER           32
 #define NUM_RING_PIXELS          (NUM_RING_INNER + NUM_RING_MID + NUM_RING_OUTER)
 #define NUM_PIXELS_TOTAL         (NUM_NEOKEYS + NUM_RING_PIXELS)
 
