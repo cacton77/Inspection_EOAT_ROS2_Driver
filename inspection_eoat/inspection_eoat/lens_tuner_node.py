@@ -30,6 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
+from std_msgs.msg import String
 
 from ps_interfaces.msg import LedRingCommand, LedRingState, LensCommand, LensState
 
@@ -100,6 +101,16 @@ class LensTuner(Node):
         self.declare_parameter('log_capacity', 20000)
         self.declare_parameter('led_command_topic', '/camera_head/led_ring/command')
         self.declare_parameter('led_state_topic', '/camera_head/led_ring/state')
+        # ROS front door to the same set_led()/set_spot() the web UI's /api/led
+        # and /api/spot call, for clients that reach the ROS graph but not this
+        # host's port 8080 -- e.g. a Foxglove panel at home, publishing through
+        # the lab's foxglove_bridge. It carries *requests*, never frames: this
+        # node stays the sole publisher of /led_ring/command, so a remote client
+        # cannot get into the two-publishers fight that the 2 Hz re-assert
+        # below would otherwise lose for it. std_msgs/String (JSON, same body as
+        # the HTTP API) so that bridge needs no ps_interfaces to publish it.
+        self.declare_parameter('led_request_topic', '/camera_head/led_ring/request')
+        self.declare_parameter('led_event_topic', '/camera_head/led_ring/event')
         # Slow re-assert of the current frame. Not a deadman -- a light is
         # supposed to stay on when the browser goes away -- but /led_ring/command
         # is best-effort at both ends, and unlike a velocity command a dropped
@@ -145,6 +156,21 @@ class LensTuner(Node):
         self.led_pub = self.create_publisher(LedRingCommand, led_cmd_topic, state_qos)
         self.create_subscription(LedRingState, led_state_topic,
                                  self._on_led_state, state_qos)
+
+        # Requests are reliable: unlike the frame stream there is no re-assert
+        # to cover a lost one. The outcome is latched (transient local, depth 1)
+        # so a panel opened later still shows what the last request did.
+        self.create_subscription(
+            String, self.get_parameter('led_request_topic').value,
+            self._on_led_request,
+            QoSProfile(reliability=ReliabilityPolicy.RELIABLE,
+                       durability=DurabilityPolicy.VOLATILE,
+                       history=HistoryPolicy.KEEP_LAST, depth=10))
+        self.led_event_pub = self.create_publisher(
+            String, self.get_parameter('led_event_topic').value,
+            QoSProfile(reliability=ReliabilityPolicy.RELIABLE,
+                       durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                       history=HistoryPolicy.KEEP_LAST, depth=1))
 
         self.lock = threading.Lock()
         self.state = None            # last LensState as a plain dict
@@ -371,6 +397,38 @@ class LensTuner(Node):
             self.led_shown = [int(c) for c in msg.colors]
             self.led_shown_keys = [int(c) for c in msg.neokey_colors]
             self.led_state_stamp = time.time()
+
+    def _on_led_request(self, msg: String):
+        """/led_ring/request: JSON body of /api/led, or of /api/spot with mode 'spot'.
+
+          {"mode": "off"}
+          {"mode": "solid", "color": "#ffffff", "ps": 0}
+          {"mode": "rings", "inner": "#ff0000", "mid": 0, "outer": "#0000ff"}
+          {"mode": "spot", "x": 0, "y": 0, "sigma": 20, "amplitude": 0.01,
+           "color": "#ffffff"}
+
+        'index' is deliberately not offered here: it is a bench instrument for
+        chain order, not lighting, and stays on the web UI.
+        """
+        try:
+            payload = json.loads(msg.data)
+            if not isinstance(payload, dict):
+                raise ValueError('not a JSON object')
+        except ValueError as e:
+            ok, text, payload = False, f'request is not a JSON object: {e}', None
+        else:
+            mode = str(payload.get('mode', ''))
+            if mode == 'spot':
+                ok, text = self.set_spot(payload)
+            elif mode in ('off', 'solid', 'rings'):
+                ok, text = self.set_led(payload)
+            else:
+                ok, text = False, (f'unknown mode {mode!r} '
+                                   '(expected off, solid, rings or spot)')
+        if not ok:
+            self.get_logger().warning(f'/led_ring/request rejected: {text}')
+        self.led_event_pub.publish(String(data=json.dumps(
+            {'ok': ok, 'message': text, 'request': payload, 'time': time.time()})))
 
     def _publish_led(self):
         """Assert the current frame. Also runs on the led_republish_hz timer."""
