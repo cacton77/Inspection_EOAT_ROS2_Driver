@@ -58,6 +58,16 @@ pi_camera:
           durability: volatile
           history: keep_last
           depth: 5
+      # The JPEG stream is what remote hosts actually pull (the lab's H.264
+      # republisher, Foxglove), so it needs best-effort even more than
+      # image_raw: left RELIABLE it stalled the camera for every subscriber,
+      # local ones included, once the lab subscribed reliably (2026-10-31).
+      /pi_camera/image_raw/compressed:
+        publisher:
+          reliability: best_effort
+          durability: volatile
+          history: keep_last
+          depth: 5
       /pi_camera/camera_info:
         publisher:
           reliability: best_effort
