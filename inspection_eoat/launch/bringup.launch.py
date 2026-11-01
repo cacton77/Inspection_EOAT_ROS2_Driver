@@ -56,6 +56,10 @@ def generate_launch_description():
         name="pi_camera",
         output="screen",
         parameters=[LaunchConfiguration("pi_camera_config")],
+        # camera_ros' watchdog (watchdog_timeout in the config) exits the node
+        # when restarting the camera in place does not bring frames back.
+        respawn=True,
+        respawn_delay=2.0,
     )
 
     joy_node = Node(
