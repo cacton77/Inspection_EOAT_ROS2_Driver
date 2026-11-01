@@ -16,6 +16,7 @@ def generate_launch_description():
             default_value=PathJoinSubstitution([
                 FindPackageShare("inspection_eoat"),
                 "config",
+                # "pi_camera_4056x3040.yaml",
                 "pi_camera_2028x1520.yaml",
             ]),
             description=(
@@ -158,14 +159,14 @@ def generate_launch_description():
     # Appended here rather than written into the list below, deliberately: that
     # list is where per-rig node selection gets toggled locally, and touching the
     # line that opens it would conflict with those local edits on pull.
-    declared_arguments += foxglove_actions
+    # declared_arguments += foxglove_actions
 
     return LaunchDescription(declared_arguments + [
-        # joy_node,
-        # d405_camera_node,
-        # pi_camera_node,
+        joy_node,
+        d405_camera_node,
+        pi_camera_node,
         # turntable_agent_node,
         lens_tuner_node,
         macro_ps_agent_node,
-        # imu_processor_node,
+        imu_processor_node,
     ])
