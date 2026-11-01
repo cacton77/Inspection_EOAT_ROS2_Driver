@@ -30,6 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
+from std_msgs.msg import String
 
 from ps_interfaces.msg import LedRingCommand, LedRingState, LensCommand, LensState
 
@@ -100,6 +101,23 @@ class LensTuner(Node):
         self.declare_parameter('log_capacity', 20000)
         self.declare_parameter('led_command_topic', '/camera_head/led_ring/command')
         self.declare_parameter('led_state_topic', '/camera_head/led_ring/state')
+        # ROS front door to the same set_led()/set_spot() the web UI's /api/led
+        # and /api/spot call, for clients that reach the ROS graph but not this
+        # host's port 8080 -- e.g. a Foxglove panel at home, publishing through
+        # the lab's foxglove_bridge. It carries *requests*, never frames: this
+        # node stays the sole publisher of /led_ring/command, so a remote client
+        # cannot get into the two-publishers fight that the 2 Hz re-assert
+        # below would otherwise lose for it. std_msgs/String (JSON, same body as
+        # the HTTP API) so that bridge needs no ps_interfaces to publish it.
+        self.declare_parameter('led_request_topic', '/camera_head/led_ring/request')
+        self.declare_parameter('led_event_topic', '/camera_head/led_ring/event')
+        # The same front door for the lens: the jog/hold/stop/limit calls behind
+        # /api/*, plus a position seek. Requests only -- this node stays the
+        # sole publisher of /lens/command, and a velocity hold arriving this way
+        # is subject to the same hold_timeout as one from the web UI, so a
+        # remote client that drops off the network stops the lens.
+        self.declare_parameter('lens_request_topic', '/camera_head/lens/request')
+        self.declare_parameter('lens_event_topic', '/camera_head/lens/event')
         # Slow re-assert of the current frame. Not a deadman -- a light is
         # supposed to stay on when the browser goes away -- but /led_ring/command
         # is best-effort at both ends, and unlike a velocity command a dropped
@@ -145,6 +163,34 @@ class LensTuner(Node):
         self.led_pub = self.create_publisher(LedRingCommand, led_cmd_topic, state_qos)
         self.create_subscription(LedRingState, led_state_topic,
                                  self._on_led_state, state_qos)
+
+        # Requests are reliable: unlike the frame stream there is no re-assert
+        # to cover a lost one. The outcome is latched (transient local, depth 1)
+        # so a panel opened later still shows what the last request did.
+        self.create_subscription(
+            String, self.get_parameter('led_request_topic').value,
+            self._on_led_request,
+            QoSProfile(reliability=ReliabilityPolicy.RELIABLE,
+                       durability=DurabilityPolicy.VOLATILE,
+                       history=HistoryPolicy.KEEP_LAST, depth=10))
+        self.led_event_pub = self.create_publisher(
+            String, self.get_parameter('led_event_topic').value,
+            QoSProfile(reliability=ReliabilityPolicy.RELIABLE,
+                       durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                       history=HistoryPolicy.KEEP_LAST, depth=1))
+
+        self.create_subscription(
+            String, self.get_parameter('lens_request_topic').value,
+            self._on_lens_request,
+            QoSProfile(reliability=ReliabilityPolicy.RELIABLE,
+                       durability=DurabilityPolicy.VOLATILE,
+                       history=HistoryPolicy.KEEP_LAST, depth=10))
+        self.lens_event_pub = self.create_publisher(
+            String, self.get_parameter('lens_event_topic').value,
+            QoSProfile(reliability=ReliabilityPolicy.RELIABLE,
+                       durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                       history=HistoryPolicy.KEEP_LAST, depth=1))
+        self._last_lens_hold = None   # suppresses events for hold keepalives
 
         self.lock = threading.Lock()
         self.state = None            # last LensState as a plain dict
@@ -286,7 +332,45 @@ class LensTuner(Node):
             self.jog_velocity = 0.0
             self.jog_stop_steps = None
             self.hold_expires = None
+            # Re-arm the zero tail even if the node had gone quiet: a position
+            # seek is only cancelled by a fresh zero-velocity command, and
+            # without this a stop after a seek would publish nothing at all.
+            self._idle_zeros = 0
             self.last_event = 'stopped'
+
+    def goto(self, position):
+        """Seek to a normalized position in [0, 1] (LensCommand.MODE_POSITION).
+
+        One message, not a stream: the firmware runs the seek to completion and
+        has no deadman on it. Needs a calibrated range, which position_norm
+        being non-null is the evidence of.
+        """
+        try:
+            target = float(position)
+        except (TypeError, ValueError):
+            return False, f'position {position!r} is not a number'
+        if not (0.0 <= target <= 1.0):
+            return False, f'position {target} is outside [0, 1]'
+        with self.lock:
+            if self.state is None:
+                return False, 'no /lens/state yet -- is the agent up?'
+            if self.state['status'] == LensState.STATUS_HOMING:
+                return False, 'homing owns the lens'
+            if self.state['position_norm'] is None:
+                return False, ('lens is not calibrated (position_norm is NaN): '
+                               'set MIN and MAX first')
+            # Cancel any jog, and skip the zero tail: those zeros are velocity
+            # commands, and the first one would cancel the seek just sent.
+            self.jog_velocity = 0.0
+            self.jog_stop_steps = None
+            self.hold_expires = None
+            self._idle_zeros = self.zero_tail
+            self.last_event = f'seek to {target:.3f}'
+        msg = LensCommand()
+        msg.mode = LensCommand.MODE_POSITION
+        msg.value = target
+        self.pub.publish(msg)
+        return True, self.last_event
 
     def set_velocity(self, velocity):
         """Set a continuous jog velocity with no step budget.
@@ -371,6 +455,92 @@ class LensTuner(Node):
             self.led_shown = [int(c) for c in msg.colors]
             self.led_shown_keys = [int(c) for c in msg.neokey_colors]
             self.led_state_stamp = time.time()
+
+    def _on_led_request(self, msg: String):
+        """/led_ring/request: JSON body of /api/led, or of /api/spot with mode 'spot'.
+
+          {"mode": "off"}
+          {"mode": "solid", "color": "#ffffff", "ps": 0}
+          {"mode": "rings", "inner": "#ff0000", "mid": 0, "outer": "#0000ff"}
+          {"mode": "spot", "x": 0, "y": 0, "sigma": 20, "amplitude": 0.01,
+           "color": "#ffffff"}
+
+        'index' is deliberately not offered here: it is a bench instrument for
+        chain order, not lighting, and stays on the web UI.
+        """
+        try:
+            payload = json.loads(msg.data)
+            if not isinstance(payload, dict):
+                raise ValueError('not a JSON object')
+        except ValueError as e:
+            ok, text, payload = False, f'request is not a JSON object: {e}', None
+        else:
+            mode = str(payload.get('mode', ''))
+            if mode == 'spot':
+                ok, text = self.set_spot(payload)
+            elif mode in ('off', 'solid', 'rings'):
+                ok, text = self.set_led(payload)
+            else:
+                ok, text = False, (f'unknown mode {mode!r} '
+                                   '(expected off, solid, rings or spot)')
+        if not ok:
+            self.get_logger().warning(f'/led_ring/request rejected: {text}')
+        self.led_event_pub.publish(String(data=json.dumps(
+            {'ok': ok, 'message': text, 'request': payload, 'time': time.time()})))
+
+    def _on_lens_request(self, msg: String):
+        """/lens/request: JSON, one op per message.
+
+          {"op": "stop"}
+          {"op": "velocity", "velocity": 400}   # hold; re-send at least every
+                                                # hold_timeout (0.6 s) or it lapses
+          {"op": "jog", "velocity": -800, "budget": 800}
+          {"op": "goto", "position": 0.42}      # needs a calibrated range
+          {"op": "set_min"} / {"op": "set_max"}
+
+        Every outcome goes to /lens/event except an accepted hold that repeats
+        the previous velocity: those are keepalives, ~5 a second, and would
+        drown the one event a panel shows.
+        """
+        try:
+            payload = json.loads(msg.data)
+            if not isinstance(payload, dict):
+                raise ValueError('not a JSON object')
+        except ValueError as e:
+            ok, text, payload = False, f'request is not a JSON object: {e}', None
+            op = None
+        else:
+            op = str(payload.get('op', ''))
+            try:
+                if op == 'stop':
+                    self.stop()
+                    ok, text = True, 'stopped'
+                elif op == 'velocity':
+                    ok, text = self.set_velocity(payload.get('velocity', 0))
+                elif op == 'jog':
+                    ok, text = self.start_jog(payload.get('velocity', 0),
+                                              payload.get('budget', 100))
+                elif op == 'goto':
+                    ok, text = self.goto(payload.get('position'))
+                elif op in ('set_min', 'set_max'):
+                    ok, text = self.set_limit(op[4:])
+                else:
+                    ok, text = False, (f'unknown op {op!r} (expected stop, velocity, '
+                                       'jog, goto, set_min or set_max)')
+            except (TypeError, ValueError) as e:
+                ok, text = False, f'bad {op} request: {e}'
+
+        if op == 'velocity' and ok:
+            v = payload.get('velocity')
+            if v == self._last_lens_hold:
+                return
+            self._last_lens_hold = v
+        else:
+            self._last_lens_hold = None
+        if not ok:
+            self.get_logger().warning(f'/lens/request rejected: {text}')
+        self.lens_event_pub.publish(String(data=json.dumps(
+            {'ok': ok, 'message': text, 'request': payload, 'time': time.time()})))
 
     def _publish_led(self):
         """Assert the current frame. Also runs on the led_republish_hz timer."""
